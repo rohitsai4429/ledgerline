@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     database_url: str = "postgresql+psycopg://localhost:5433/ledgerline"
+    cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     jwt_secret_key: SecretStr = Field(min_length=32)
     jwt_algorithm: Literal["HS256"] = "HS256"
     jwt_access_token_minutes: int = Field(default=30, gt=0, le=1440)

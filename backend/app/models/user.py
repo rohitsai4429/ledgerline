@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, Index, String, Uuid, func, text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+
+if TYPE_CHECKING:
+    from app.models.account import Account, LedgerAccount
 
 
 class UserRole(str, enum.Enum):
@@ -22,7 +28,11 @@ class UserStatus(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
-        Index("uq_users_email_normalized", text("lower(trim(email))"), unique=True),
+        Index(
+            "uq_users_email_normalized",
+            text("lower(trim(email))"),
+            unique=True,
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -57,3 +67,5 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    accounts: Mapped[list[Account]] = relationship(back_populates="owner")
+    ledger_accounts: Mapped[list[LedgerAccount]] = relationship(back_populates="owner")

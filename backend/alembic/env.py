@@ -18,6 +18,24 @@ config.set_main_option(
 target_metadata = models.Base.metadata
 
 
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    # PostgreSQL reflects the normalized-email index with rewritten TRIM syntax.
+    if (
+        type_ == "index"
+        and name == "uq_users_email_normalized"
+        and getattr(object_, "name", None) == name
+        and (reflected or compare_to is not None)
+    ):
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
@@ -25,6 +43,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -43,6 +62,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

@@ -45,7 +45,8 @@ integrity, transaction consistency and auditability.
 - [x] Database design
 - [x] Backend scaffold
 - [x] Authentication
-- [ ] Accounts and financial features
+- [x] Account management
+- [ ] Deposits, withdrawals, and transfers
 - [ ] Frontend development
 - [ ] Security testing
 - [ ] Deployment
@@ -94,18 +95,11 @@ Compose publishes PostgreSQL on host port `5433` (container port `5432`) to
 avoid conflicts with a PostgreSQL service already using `5432` on Windows.
 The application connects to `localhost:5433`.
 
-Apply the additive user-table migration (this does not reset or delete data):
+Apply all additive database migrations (this does not reset or delete data):
 
 ```powershell
 alembic upgrade head
 ```
-
-Before applying migrations to an existing database, confirm the configured
-target and current revision. During the latest verification, Alembic CLI
-reported `20261107_0001` as current, but direct inspection through the
-application connection and a same-process Alembic check found no application
-tables or `alembic_version` row. Migration application and PostgreSQL-backed
-authentication tests were stopped until this discrepancy is resolved.
 
 Start the API:
 
@@ -130,10 +124,29 @@ Authentication endpoints:
 
 Passwords must be at least 12 characters. Registration does not accept a
 caller-supplied role; administrative account provisioning is not implemented.
-The first Alembic migration creates the users table and its normalized-email
-uniqueness constraint. On an existing Docker volume, changing
-`POSTGRES_PASSWORD` does not update the stored PostgreSQL role password;
-update it explicitly and keep `DATABASE_URL` synchronized.
+The authentication migration creates the users table and normalized-email
+uniqueness constraint.
+
+Account management endpoints:
+
+- `POST /api/v1/accounts` — authenticated account holders create an account
+  with a generated account number, an associated ledger account, and a zero
+  balance.
+- `GET /api/v1/accounts` and `GET /api/v1/accounts/{account_id}` — account
+  holders see their own accounts; administrators and auditors can read all
+  accounts.
+- `PATCH /api/v1/accounts/{account_id}/status` — administrators can set
+  `ACTIVE`, `FROZEN`, or `CLOSED`; closed accounts cannot be reactivated.
+
+Balances are stored as integer paise and constrained to be nonnegative.
+Account APIs do not accept balance changes. Auditors have read-only access;
+deposits, withdrawals, and transfers are not implemented.
+
+Both Alembic migrations are applied to the configured local database; current
+revision is `20261107_0002`. PostgreSQL schema comparison reports no pending
+model differences. On an existing Docker volume, changing `POSTGRES_PASSWORD`
+does not update the stored PostgreSQL role password; update it explicitly and
+keep `DATABASE_URL` synchronized.
 
 ### Backend work completed
 
@@ -145,14 +158,19 @@ update it explicitly and keep `DATABASE_URL` synchronized.
   account status checks, signed expiring JWTs, and role authorization.
 - Public registration always assigns `ACCOUNT_HOLDER`; callers cannot set
   their own role.
-- Additive Alembic migration for the users table and isolated authentication
-  tests.
+- Account management with generated account numbers, owner-scoped access,
+  admin status controls, auditor read-only access, and a required one-to-one
+  ledger-account relationship.
+- Balances stored in integer paise with a database nonnegative constraint;
+  no account API can modify balances.
+- Additive Alembic migrations for users, ledger accounts, and customer
+  accounts.
 
-The current test suite has 10 passing tests. Authentication tests use an
-in-memory SQLite database and do not modify the development PostgreSQL
-database. The migration SQL was generated and checked, but the migration has
-not yet been applied to PostgreSQL. Pytest currently emits a Starlette
-`TestClient` deprecation warning.
+The current test suite has 19 passing tests, including 9 account integration
+and security tests against PostgreSQL. Authentication unit tests use an
+in-memory SQLite database. PostgreSQL integration test data is rolled back
+after each test. Pytest currently emits a Starlette `TestClient` deprecation
+warning.
 
 ## Security and Integrity
 
@@ -198,10 +216,11 @@ LedgerLine follows a Modular Monolithic Architecture.
 - [x] Requirements documentation
 - [x] Data dictionary
 - [x] Architecture documentation
-- [ ] Database implementation
+- [x] Database schema and migrations
 - [x] Backend scaffold
 - [x] Authentication
-- [ ] Accounts and financial features
+- [x] Account management
+- [ ] Deposits, withdrawals, and transfers
 - [ ] Frontend development
 - [ ] Security testing
 - [ ] Deployment

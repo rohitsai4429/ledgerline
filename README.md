@@ -20,7 +20,7 @@ integrity, transaction consistency and auditability.
 - Maintain double-entry bookkeeping.
 - Handle concurrent transactions safely.
 - Enforce role-based access control.
-- Maintain tamper-resistant financial records.
+- Protect posted ledger records against ordinary application-level mutation.
 - Provide transaction statements and audit trails.
 
 ## User Roles
@@ -46,7 +46,7 @@ integrity, transaction consistency and auditability.
 - [x] Backend scaffold
 - [x] Authentication
 - [x] Account management
-- [ ] Deposits, withdrawals, and transfers
+- [x] Deposits, withdrawals, and transfers
 - [ ] Frontend development
 - [ ] Security testing
 - [ ] Deployment
@@ -139,14 +139,49 @@ Account management endpoints:
   `ACTIVE`, `FROZEN`, or `CLOSED`; closed accounts cannot be reactivated.
 
 Balances are stored as integer paise and constrained to be nonnegative.
-Account APIs do not accept balance changes. Auditors have read-only access;
-deposits, withdrawals, and transfers are not implemented.
+Account APIs do not accept balance changes. All transaction amounts are
+positive integer paise in INR; multi-currency posting is not enabled.
+Auditors have read-only access.
 
-Both Alembic migrations are applied to the configured local database; current
-revision is `20261107_0002`. PostgreSQL schema comparison reports no pending
-model differences. On an existing Docker volume, changing `POSTGRES_PASSWORD`
-does not update the stored PostgreSQL role password; update it explicitly and
-keep `DATABASE_URL` synchronized.
+The three additive Alembic migrations are applied to the configured local
+database; current revision is `20261107_0003`. PostgreSQL schema comparison
+reports no pending model differences. On an existing Docker volume, changing
+`POSTGRES_PASSWORD` does not update the stored PostgreSQL role password;
+update it explicitly and keep `DATABASE_URL` synchronized.
+
+### Financial transaction API
+
+- `POST /api/v1/transactions/deposits` — credit an owned active account against
+  the INR deposit-clearing ledger account.
+- `POST /api/v1/transactions/withdrawals` — debit an owned active account
+  against the INR withdrawal-clearing ledger account; overdrafts are rejected.
+- `POST /api/v1/transactions/transfers` — transfer paise from an owned active
+  account to another active account.
+- `POST /api/v1/transactions/{transaction_id}/reverse` — administrator-only
+  correction by posting an opposite journal, never by editing posted entries.
+- `GET /api/v1/transactions` — paginated transaction history. Account holders
+  see transactions involving their own accounts; administrators and auditors
+  can read all transactions.
+- `GET /api/v1/accounts/{account_id}/statement` — account-scoped statement with
+  opening, closing, and running integer-paise balances.
+- `GET /api/v1/audit-events` — administrator/auditor access to operation audit
+  events.
+
+Each posting requires an `Idempotency-Key` header. Keys are unique per user;
+retrying the same key and payload returns the original success or rejection,
+while reusing a key with a different payload is rejected. PostgreSQL advisory
+locks serialize duplicate keys. Account rows are locked in UUID order to
+prevent concurrent overspending.
+
+Each journal is posted with exactly one debit and one credit of the same
+positive amount and currency. Deferred PostgreSQL triggers validate the
+two-line balance, transaction-party mapping, and agreement between customer
+account balances and their ledger entries. Posted journals, ledger entries,
+idempotency records, audit events, ledger-account identities, and account
+ownership/ledger links are protected from updates and deletes by database
+triggers. These controls are not tamper-proof against a database owner or
+superuser who can alter or disable the triggers; no cryptographic or
+write-once audit system is claimed.
 
 ### Backend work completed
 
@@ -163,19 +198,31 @@ keep `DATABASE_URL` synchronized.
   ledger-account relationship.
 - Balances stored in integer paise with a database nonnegative constraint;
   no account API can modify balances.
-- Additive Alembic migrations for users, ledger accounts, and customer
-  accounts.
+- Double-entry financial transaction engine for deposits, withdrawals,
+  internal transfers, admin reversals, transaction history, statements, and
+  operation audits.
+- Additive Alembic migrations for users, customer/system ledger accounts,
+  journals, entries, idempotency records, and audit events.
 
-The current test suite has 19 passing tests, including 9 account integration
-and security tests against PostgreSQL. Authentication unit tests use an
-in-memory SQLite database. PostgreSQL integration test data is rolled back
-after each test. Pytest currently emits a Starlette `TestClient` deprecation
-warning.
+The current test suite has **35 passing tests**: 9 PostgreSQL account tests,
+16 PostgreSQL financial transaction tests, 9 authentication tests using
+in-memory SQLite, and 1 health test. Transaction integration and concurrency
+tests run against PostgreSQL in a generated temporary schema that is dropped
+after the test module; account tests use rollback. The shared `ledgerline`
+database is at revision `20261107_0003`; it contains only the two seeded
+clearing accounts and no test users, customer accounts, journals, entries,
+idempotency records, or audit events. Pytest emits one Starlette `TestClient`
+deprecation warning.
 
 ## Security and Integrity
 
-Detailed security controls and threat analysis
-will be documented as development progresses.
+Database triggers enforce journal balancing, valid transaction-party mapping,
+ledger-to-balance reconciliation, and immutability for posted records. Rejected
+business operations are recorded in durable audit and idempotency records
+without committing balance or ledger changes. These protections are not
+tamper-proof against privileged database operators. No external payment
+settlement, multi-currency processing, or cryptographic audit chain is
+implemented.
 
 ## Documentation
 
@@ -220,7 +267,7 @@ LedgerLine follows a Modular Monolithic Architecture.
 - [x] Backend scaffold
 - [x] Authentication
 - [x] Account management
-- [ ] Deposits, withdrawals, and transfers
+- [x] Deposits, withdrawals, and transfers
 - [ ] Frontend development
 - [ ] Security testing
 - [ ] Deployment

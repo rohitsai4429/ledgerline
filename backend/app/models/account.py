@@ -31,17 +31,48 @@ class AccountStatus(str, enum.Enum):
     CLOSED = "CLOSED"
 
 
+class LedgerAccountKind(str, enum.Enum):
+    CUSTOMER = "CUSTOMER"
+    DEPOSIT_CLEARING = "DEPOSIT_CLEARING"
+    WITHDRAWAL_CLEARING = "WITHDRAWAL_CLEARING"
+
+
 class LedgerAccount(Base):
     __tablename__ = "ledger_accounts"
     __table_args__ = (
+        CheckConstraint(
+            "(kind = 'CUSTOMER' AND owner_user_id IS NOT NULL AND system_code IS NULL) "
+            "OR (kind IN ('DEPOSIT_CLEARING', 'WITHDRAWAL_CLEARING') "
+            "AND owner_user_id IS NULL AND system_code IS NOT NULL)",
+            name="ck_ledger_accounts_owner_kind",
+        ),
+        CheckConstraint("currency = 'INR'", name="ck_ledger_accounts_currency_inr"),
         Index("ix_ledger_accounts_owner_user_id", "owner_user_id"),
+        Index("uq_ledger_accounts_system_code", "system_code", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    owner_user_id: Mapped[uuid.UUID] = mapped_column(
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    kind: Mapped[LedgerAccountKind] = mapped_column(
+        Enum(
+            LedgerAccountKind,
+            name="ledger_account_kind",
+            values_callable=lambda kind_enum: [kind.value for kind in kind_enum],
+        ),
         nullable=False,
+        default=LedgerAccountKind.CUSTOMER,
+        server_default=LedgerAccountKind.CUSTOMER.value,
+    )
+    system_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+        default="INR",
+        server_default="INR",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -49,7 +80,7 @@ class LedgerAccount(Base):
         server_default=func.now(),
     )
 
-    owner: Mapped[User] = relationship(back_populates="ledger_accounts")
+    owner: Mapped[User | None] = relationship(back_populates="ledger_accounts")
     account: Mapped[Account | None] = relationship(
         back_populates="ledger_account",
         uselist=False,

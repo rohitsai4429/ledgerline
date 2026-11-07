@@ -114,3 +114,64 @@ Nine PostgreSQL account integration/security tests passed, as did the full
 19-test suite. Alembic schema comparison found no pending operations.
 Python compilation, dependency checks, and Pylance diagnostics passed.
 Pytest reported a Starlette `TestClient` deprecation warning.
+
+## Entry — Financial Transaction Engine
+
+**Date:** 2026-11-07
+
+**Feature:** LedgerLine double-entry financial transaction engine
+
+**AI Tools:** Copilot SDK in VS Code
+
+### Prompt Used
+
+Implement deposits, withdrawals, internal transfers, double-entry journals,
+idempotency, transaction history, account statements, reversals, and durable
+audit events on the existing FastAPI/PostgreSQL architecture. Preserve the
+existing authentication and account features, use PostgreSQL concurrency
+controls, protect posted records at the database level, add an additive
+migration, and verify all behavior without resetting the existing database.
+
+### Implementation
+
+Added customer/deposit-clearing/withdrawal-clearing ledger account kinds and
+seeded the two INR clearing accounts. Added journal transactions, debit/credit
+ledger entries, per-user idempotency records, and audit events. Deposits,
+withdrawals, and transfers update balances and post balanced journals in one
+database transaction. Admin reversals post opposite entries. Transaction
+history, account statements, and administrator/auditor audit-event reads are
+available through the API.
+
+PostgreSQL advisory transaction locks serialize identical idempotency keys;
+account rows are locked in deterministic UUID order. Rejected business
+operations persist a rejection audit and idempotency result without retaining
+balance or ledger changes. Database triggers validate posted two-line journals
+and ledger/account reconciliation, and reject mutation/deletion of posted
+journals, entries, idempotency records, audit events, ledger-account identity,
+and account ownership/ledger linkage. These controls are not claimed to be
+tamper-proof against privileged database operators. Posting is INR-only; no
+external payment settlement or multi-currency processing was added.
+
+Added additive migration `20261107_0003`, extending ledger accounts and
+creating the journal, entry, idempotency, and audit tables and constraints.
+The migration was applied to the configured PostgreSQL 17 `ledgerline`
+database at host port `5433`, after confirming its revision was `20261107_0002`
+and its existing user/account tables had no rows.
+
+### Verification
+
+The full suite passed: **35 tests** (the 19 existing tests plus 16 new
+PostgreSQL transaction integration tests). The new tests cover deposits,
+withdrawals, transfers, reversals, insufficient funds, replay and changed
+payload behavior, concurrent duplicate requests, concurrent withdrawals and
+transfers, rollback, access control, audit records, statements, ledger
+invariants, and database-enforced immutability. Transaction tests use separate
+sessions against PostgreSQL in a generated temporary schema, which is dropped
+after the test module; the shared database was not used for test records.
+
+Alembic reports revision `20261107_0003` as the sole head and `alembic check`
+reports no pending operations. The shared database contains two clearing
+ledger accounts and no test users, customer accounts, journals, entries,
+idempotency records, or audit events. Application import/OpenAPI routes,
+Python compilation, dependency consistency, and Pylance diagnostics passed.
+Pytest reports one existing Starlette `TestClient` deprecation warning.

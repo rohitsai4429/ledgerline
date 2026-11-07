@@ -192,7 +192,7 @@ export function DashboardPage() {
                 : (auditQuery.data ?? []).map((event) => (
                   <div className="audit-row" key={event.id}>
                     <span className={`audit-dot audit-${event.outcome.toLowerCase()}`} />
-                    <div><strong>{event.event_type.replaceAll('_', ' ')}</strong><small>{event.actor_user_id.slice(0, 8)} · {new Date(event.created_at).toLocaleString('en-IN')}</small></div>
+                    <div><strong>{event.event_type.replaceAll('_', ' ')}</strong><small>{event.actor_user_id?.slice(0, 8) ?? 'Unauthenticated'} · {new Date(event.created_at).toLocaleString('en-IN')}</small></div>
                     <span className="audit-result">{event.outcome}</span>
                   </div>
                 ))}

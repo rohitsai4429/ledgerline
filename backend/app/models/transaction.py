@@ -86,11 +86,10 @@ class JournalTransaction(Base):
             values_callable=lambda enum_type: [item.value for item in enum_type],
         ),
         nullable=False,
-        default=JournalTransactionStatus.POSTING,
         server_default=JournalTransactionStatus.POSTING.value,
     )
     amount_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR", server_default="INR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
     source_account_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey(
@@ -168,7 +167,7 @@ class LedgerEntry(Base):
         nullable=False,
     )
     amount_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR", server_default="INR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -242,10 +241,10 @@ class AuditEvent(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
     journal_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),

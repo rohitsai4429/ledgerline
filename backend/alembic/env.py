@@ -1,20 +1,24 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from sqlalchemy.engine import Connection
 
 from app import models
-from app.core.config import get_settings
+from app.core.config import get_migration_database_url
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+migration_database_url = get_migration_database_url()
+if migration_database_url is None:
+    raise RuntimeError("MIGRATION_DATABASE_URL must be set to run Alembic migrations")
+
 config.set_main_option(
     "sqlalchemy.url",
-    get_settings().database_url.replace("%", "%%"),
+    migration_database_url.replace("%", "%%"),
 )
 target_metadata = models.Base.metadata
 
@@ -52,6 +56,13 @@ def run_migrations_offline() -> None:
 
 
 def run_with_connection(connection: Connection) -> None:
+    had_transaction = connection.in_transaction()
+    current_user = connection.scalar(text("SELECT current_user"))
+    if not had_transaction:
+        connection.commit()
+    if current_user == "ledgerline_app":
+        raise RuntimeError("Alembic migrations must not run as ledgerline_app")
+
     context.configure(
         connection=connection,
         target_metadata=target_metadata,

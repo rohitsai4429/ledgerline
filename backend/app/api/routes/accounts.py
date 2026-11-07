@@ -69,15 +69,15 @@ def get_customer_account(
 @router.patch(
     "/{account_id}/status",
     response_model=AccountResponse,
-    dependencies=[Depends(require_roles(UserRole.ADMIN))],
 )
 def set_customer_account_status(
     account_id: UUID,
     payload: AccountStatusUpdate,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
     db: Annotated[Session, Depends(get_db)],
 ) -> Account:
     try:
-        return update_account_status(db, account_id, payload.status)
+        return update_account_status(db, account_id, payload.status, current_user)
     except AccountNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found") from None
     except ClosedAccountError:

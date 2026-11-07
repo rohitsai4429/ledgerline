@@ -64,14 +64,16 @@ class LedgerAccount(Base):
             values_callable=lambda kind_enum: [kind.value for kind in kind_enum],
         ),
         nullable=False,
-        default=LedgerAccountKind.CUSTOMER,
         server_default=LedgerAccountKind.CUSTOMER.value,
     )
-    system_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    system_code: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        server_default=text("NULL"),
+    )
     currency: Mapped[str] = mapped_column(
         String(3),
         nullable=False,
-        default="INR",
         server_default="INR",
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -112,7 +114,7 @@ class Account(Base):
         nullable=False,
         unique=True,
     )
-    balance_paise: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    balance_paise: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     status: Mapped[AccountStatus] = mapped_column(
         Enum(
             AccountStatus,
@@ -120,7 +122,6 @@ class Account(Base):
             values_callable=lambda status_enum: [status.value for status in status_enum],
         ),
         nullable=False,
-        default=AccountStatus.ACTIVE,
         server_default=AccountStatus.ACTIVE.value,
     )
     created_at: Mapped[datetime] = mapped_column(

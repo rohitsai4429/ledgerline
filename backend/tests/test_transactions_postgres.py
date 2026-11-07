@@ -11,9 +11,9 @@ from sqlalchemy import case, create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_migration_database_url, get_settings
 from app.core.security import create_access_token, hash_password
-from app.database.session import engine, get_db
+from app.database.session import get_db
 from app.main import app
 from app.models.account import Account, LedgerAccount, LedgerAccountKind
 from app.models.transaction import (
@@ -29,34 +29,73 @@ from app.models.user import User, UserRole, UserStatus
 from app.schemas.transaction import MAX_AMOUNT_PAISE
 from app.services import transactions as transaction_service
 
+_setup_factories: dict[str, sessionmaker[Session]] = {}
+
 
 @pytest.fixture(scope="module")
 def transaction_factory() -> Iterator[sessionmaker[Session]]:
     schema = f"ledgerline_test_{uuid4().hex}"
-    with engine.begin() as connection:
+    settings = get_settings()
+    migration_url = get_migration_database_url()
+    if migration_url is None:
+        raise RuntimeError(
+            "MIGRATION_DATABASE_URL is required for PostgreSQL integration tests"
+        )
+    migration_engine = create_engine(
+        migration_url,
+        pool_pre_ping=True,
+    )
+    migration_schema_engine = None
+    with migration_engine.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-
+        if connection.scalar(
+            text("SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'ledgerline_app')")
+        ):
+            connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO ledgerline_app'))
+    migration_schema_engine = create_engine(
+        migration_url,
+        connect_args={"options": f"-c search_path={schema}"},
+        pool_pre_ping=True,
+    )
+    migration_runtime = sessionmaker(bind=migration_schema_engine, autoflush=False)
     isolated_engine = create_engine(
-        get_settings().database_url,
+        settings.database_url,
         connect_args={"options": f"-c search_path={schema}"},
         pool_pre_ping=True,
     )
     try:
+        with migration_schema_engine.connect() as connection:
+            if connection.scalar(text("SELECT current_user")) != "ledgerline_user":
+                raise RuntimeError(
+                    "MIGRATION_DATABASE_URL must connect as ledgerline_user "
+                    "to apply its default privileges"
+                )
+
         config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-        with isolated_engine.connect() as connection:
+        with migration_schema_engine.connect() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
+            connection.commit()
 
         factory = sessionmaker(
             bind=isolated_engine,
             autoflush=False,
             expire_on_commit=False,
         )
+        with factory() as session:
+            if session.scalar(text("SELECT current_user")) != "ledgerline_app":
+                raise RuntimeError(
+                    "DATABASE_URL must connect as ledgerline_app for runtime-role tests"
+                )
+        _setup_factories[schema] = migration_runtime
         yield factory
     finally:
+        _setup_factories.pop(schema, None)
         isolated_engine.dispose()
-        with engine.begin() as connection:
+        migration_schema_engine.dispose()
+        with migration_engine.begin() as connection:
             connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        migration_engine.dispose()
 
 
 @pytest.fixture
@@ -79,7 +118,11 @@ def create_user(
     factory: sessionmaker[Session],
     role: UserRole = UserRole.ACCOUNT_HOLDER,
 ) -> User:
-    with factory() as session:
+    with factory() as runtime_session:
+        schema = runtime_session.scalar(text("SELECT current_schema()"))
+    if schema not in _setup_factories:
+        raise RuntimeError("No privileged test fixture is registered for this schema")
+    with _setup_factories[schema]() as session:
         user = User(
             email=f"{uuid4().hex}@transactions.test",
             password_hash=hash_password("test-only financial transaction password"),
@@ -90,6 +133,19 @@ def create_user(
         session.commit()
         session.refresh(user)
         return user
+
+
+def _assert_permission_denied(
+    factory: sessionmaker[Session],
+    statement: str,
+    params: dict[str, object] | None = None,
+) -> None:
+    with factory() as session:
+        with pytest.raises(DBAPIError) as error:
+            session.execute(text(statement), params or {})
+        sqlstate = getattr(error.value.orig, "sqlstate", None)
+        assert sqlstate == "42501"
+        session.rollback()
 
 
 def auth_headers(user: User) -> dict[str, str]:
@@ -216,7 +272,10 @@ def test_deposit_withdrawal_transfer_and_ledger_invariants(
         assert session.scalar(
             select(func.count())
             .select_from(AuditEvent)
-            .where(AuditEvent.actor_user_id == sender.id)
+            .where(
+                AuditEvent.actor_user_id == sender.id,
+                AuditEvent.event_type.in_(["DEPOSIT", "WITHDRAWAL", "TRANSFER"]),
+            )
         ) == 3
 
 
@@ -302,7 +361,10 @@ def test_insufficient_funds_is_idempotently_rejected_and_audited(
         assert record.outcome.value == "REJECTED"
         assert record.result_code == "insufficient_funds"
         rejected = session.scalar(
-            select(AuditEvent).where(AuditEvent.actor_user_id == owner.id)
+            select(AuditEvent).where(
+                AuditEvent.actor_user_id == owner.id,
+                AuditEvent.event_type == "WITHDRAWAL_REJECTED",
+            )
         )
         assert rejected is not None
         assert rejected.outcome == "REJECTED"
@@ -333,6 +395,42 @@ def test_unauthorised_access_auditor_read_only_and_owner_checks(
         "auditor-deposit",
         {"account_id": str(owner_account), "amount_paise": 100},
     )
+    auditor_withdrawal = post_json(
+        client,
+        "/api/v1/transactions/withdrawals",
+        auditor,
+        "auditor-withdrawal",
+        {"account_id": str(owner_account), "amount_paise": 1},
+    )
+    auditor_transfer = post_json(
+        client,
+        "/api/v1/transactions/transfers",
+        auditor,
+        "auditor-transfer",
+        {
+            "source_account_id": str(owner_account),
+            "destination_account_id": str(other_account),
+            "amount_paise": 1,
+        },
+    )
+    auditor_reversal = post_json(
+        client,
+        f"/api/v1/transactions/{uuid4()}/reverse",
+        auditor,
+        "auditor-reversal",
+        {},
+    )
+    foreign_source_transfer = post_json(
+        client,
+        "/api/v1/transactions/transfers",
+        owner,
+        "foreign-source-transfer",
+        {
+            "source_account_id": str(other_account),
+            "destination_account_id": str(owner_account),
+            "amount_paise": 1,
+        },
+    )
     admin_deposit = post_json(
         client,
         "/api/v1/transactions/deposits",
@@ -343,6 +441,11 @@ def test_unauthorised_access_auditor_read_only_and_owner_checks(
     auditor_history = client.get(
         "/api/v1/transactions",
         headers=auth_headers(auditor),
+    )
+    foreign_history = client.get(
+        "/api/v1/transactions",
+        headers=auth_headers(owner),
+        params={"account_id": str(other_account)},
     )
     auditor_statement = client.get(
         f"/api/v1/accounts/{owner_account}/statement",
@@ -355,8 +458,13 @@ def test_unauthorised_access_auditor_read_only_and_owner_checks(
 
     assert foreign_deposit.status_code == 404
     assert auditor_deposit.status_code == 403
+    assert auditor_withdrawal.status_code == 403
+    assert auditor_transfer.status_code == 403
+    assert auditor_reversal.status_code == 403
+    assert foreign_source_transfer.status_code == 404
     assert admin_deposit.status_code == 403
     assert auditor_history.status_code == 200
+    assert foreign_history.status_code == 404
     assert auditor_statement.status_code == 200
     assert auditor_audit_history.status_code == 200
     assert balance_for(factory, owner_account) == 0
@@ -376,7 +484,7 @@ def test_unauthorised_access_auditor_read_only_and_owner_checks(
                 AuditEvent.outcome == "REJECTED",
             )
         ).all()
-        assert len(rejected_events) == 3
+        assert len(rejected_events) == 7
 
 
 def test_reversal_posts_opposite_entries_and_adjusts_balance(
@@ -423,6 +531,23 @@ def test_reversal_posts_opposite_entries_and_adjusts_balance(
     assert second_reversal.status_code == 409
     assert balance_for(factory, account_id) == 0
     assert ledger_balance_for(factory, account_id) == 0
+    with factory() as session:
+        reversal_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "REVERSAL",
+                AuditEvent.actor_user_id == admin.id,
+            )
+        ).all()
+        rejection_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "REVERSAL_REJECTED",
+                AuditEvent.actor_user_id.in_([owner.id, admin.id]),
+            )
+        ).all()
+        assert len(reversal_events) == 1
+        assert reversal_events[0].journal_transaction_id == UUID(reversed_response.json()["id"])
+        assert len(rejection_events) == 2
+        assert {event.actor_user_id for event in rejection_events} == {owner.id, admin.id}
 
 
 def test_transfer_reversal_restores_both_account_balances(
@@ -492,15 +617,31 @@ def test_frozen_account_rejects_and_audits_financial_operation(
     assert status_response.status_code == 200
     assert rejected.status_code == 409
     assert balance_for(factory, account_id) == 0
+    closed_account_id = create_account(client, owner)
+    closed_status = client.patch(
+        f"/api/v1/accounts/{closed_account_id}/status",
+        headers=auth_headers(admin),
+        json={"status": "CLOSED"},
+    )
+    closed_deposit = post_json(
+        client,
+        "/api/v1/transactions/deposits",
+        owner,
+        "closed-deposit",
+        {"account_id": str(closed_account_id), "amount_paise": 100},
+    )
+    assert closed_status.status_code == 200
+    assert closed_deposit.status_code == 409
+    assert balance_for(factory, closed_account_id) == 0
     with factory() as session:
-        event = session.scalar(
+        events = session.scalars(
             select(AuditEvent).where(
                 AuditEvent.actor_user_id == owner.id,
                 AuditEvent.event_type == "DEPOSIT_REJECTED",
             )
-        )
-        assert event is not None
-        assert event.details["reason"] == "account_not_active"
+        ).all()
+        assert len(events) == 2
+        assert all(event.details["reason"] == "account_not_active" for event in events)
 
 
 def test_posted_journal_and_entries_are_database_immutable(
@@ -518,23 +659,16 @@ def test_posted_journal_and_entries_are_database_immutable(
     )
     transaction_id = UUID(response.json()["id"])
 
-    with factory() as session:
-        with pytest.raises(DBAPIError):
-            session.execute(
-                text("UPDATE ledger_entries SET amount_paise = 2 WHERE journal_transaction_id = :id"),
-                {"id": transaction_id},
-            )
-            session.commit()
-        session.rollback()
-
-    with factory() as session:
-        with pytest.raises(DBAPIError):
-            session.execute(
-                text("UPDATE journal_transactions SET amount_paise = 2 WHERE id = :id"),
-                {"id": transaction_id},
-            )
-            session.commit()
-        session.rollback()
+    _assert_permission_denied(
+        factory,
+        "UPDATE ledger_entries SET amount_paise = 2 WHERE journal_transaction_id = :id",
+        {"id": transaction_id},
+    )
+    _assert_permission_denied(
+        factory,
+        "UPDATE journal_transactions SET amount_paise = 2 WHERE id = :id",
+        {"id": transaction_id},
+    )
 
 
 def test_database_rejects_unbalanced_posting_and_unledgered_balance_change(
@@ -547,7 +681,6 @@ def test_database_rejects_unbalanced_posting_and_unledgered_balance_change(
             account_number=f"LL{uuid4().int % 10**10:010d}",
             owner_user_id=owner.id,
             ledger_account_id=uuid4(),
-            balance_paise=0,
         )
         ledger = LedgerAccount(owner_user_id=owner.id)
         session.add(ledger)
@@ -577,21 +710,375 @@ def test_database_rejects_unbalanced_posting_and_unledgered_balance_change(
             )
         )
         session.flush()
-        journal.status = JournalTransactionStatus.POSTED
-        with pytest.raises(DBAPIError):
+        session.execute(
+            select(func.ledgerline_mark_journal_posted(journal.id))
+        )
+        with pytest.raises(DBAPIError) as error:
             session.commit()
+        assert getattr(error.value.orig, "sqlstate", None) == "P0001"
+        session.rollback()
 
     with factory() as session:
-        with pytest.raises(DBAPIError):
-            session.execute(
-                text("UPDATE accounts SET balance_paise = 100 WHERE id = :id"),
-                {"id": account_id},
-            )
+        session.execute(
+            text("UPDATE accounts SET balance_paise = 100 WHERE id = :id"),
+            {"id": account_id},
+        )
+        with pytest.raises(DBAPIError) as error:
             session.commit()
+        assert getattr(error.value.orig, "sqlstate", None) == "P0001"
         session.rollback()
         account = session.get(Account, account_id)
         assert account is not None
         assert account.balance_paise == 0
+
+
+def test_runtime_role_cannot_change_user_privileges_or_account_ownership(
+    transaction_factory: sessionmaker[Session],
+) -> None:
+    user = create_user(transaction_factory)
+    _assert_permission_denied(
+        transaction_factory,
+        "INSERT INTO users (id, email, password_hash, role) "
+        "VALUES (:id, :email, :password_hash, 'ADMIN')",
+        {
+            "id": uuid4(),
+            "email": f"{uuid4().hex}@privilege.test",
+            "password_hash": "not-a-real-password-hash",
+        },
+    )
+    _assert_permission_denied(
+        transaction_factory,
+        "UPDATE users SET role = 'ADMIN' WHERE id = :user_id",
+        {"user_id": user.id},
+    )
+    _assert_permission_denied(
+        transaction_factory,
+        "UPDATE accounts SET owner_user_id = :other WHERE owner_user_id = :user_id",
+        {"other": uuid4(), "user_id": user.id},
+    )
+    _assert_permission_denied(
+        transaction_factory,
+        "INSERT INTO accounts "
+        "(id, account_number, owner_user_id, ledger_account_id, balance_paise) "
+        "VALUES (:id, :account_number, :owner_user_id, :ledger_account_id, 0)",
+        {
+            "id": uuid4(),
+            "account_number": f"LL{uuid4().int % 10_000_000_000:010d}",
+            "owner_user_id": user.id,
+            "ledger_account_id": uuid4(),
+        },
+    )
+    _assert_permission_denied(
+        transaction_factory,
+        "INSERT INTO ledger_accounts (id, kind, system_code) "
+        "VALUES (:id, 'DEPOSIT_CLEARING', 'forbidden-clearing-account')",
+        {"id": uuid4()},
+    )
+
+
+def test_runtime_role_has_only_justified_table_permissions(
+    transaction_factory: sessionmaker[Session],
+) -> None:
+    with transaction_factory() as session:
+        assert session.scalar(text("SELECT current_user")) == "ledgerline_app"
+        privileges = session.execute(
+            text(
+                """
+                SELECT table_name,
+                       has_table_privilege(
+                           current_user,
+                           format('%I.%I', current_schema(), table_name)::regclass,
+                           'SELECT'
+                       ) AS can_select,
+                       has_table_privilege(
+                           current_user,
+                           format('%I.%I', current_schema(), table_name)::regclass,
+                           'INSERT'
+                       ) AS table_insert,
+                       has_table_privilege(
+                           current_user,
+                           format('%I.%I', current_schema(), table_name)::regclass,
+                           'UPDATE'
+                       ) AS table_update,
+                       has_table_privilege(
+                           current_user,
+                           format('%I.%I', current_schema(), table_name)::regclass,
+                           'DELETE'
+                       ) AS can_delete
+                FROM unnest(ARRAY[
+                    'users', 'accounts', 'ledger_accounts', 'journal_transactions',
+                    'ledger_entries', 'idempotency_records', 'audit_events',
+                    'alembic_version'
+                ]) AS permissions(table_name)
+                """
+            )
+        ).mappings().all()
+        by_table = {row["table_name"]: row for row in privileges}
+        for table_name in (
+            "users",
+            "accounts",
+            "ledger_accounts",
+            "journal_transactions",
+            "ledger_entries",
+            "idempotency_records",
+            "audit_events",
+        ):
+            assert by_table[table_name]["can_select"]
+            assert not by_table[table_name]["table_insert"]
+            assert not by_table[table_name]["table_update"]
+            assert not by_table[table_name]["can_delete"]
+        assert not any(
+            by_table["alembic_version"][privilege]
+            for privilege in ("can_select", "table_insert", "table_update", "can_delete")
+        )
+        assert session.scalar(
+            text(
+                """
+                SELECT has_column_privilege(
+                           current_user, 'users', 'email', 'INSERT'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'users', 'password_hash', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'users', 'role', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'users', 'status', 'INSERT'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'accounts', 'owner_user_id', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'accounts', 'balance_paise', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'accounts', 'status', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'accounts', 'owner_user_id', 'UPDATE'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'accounts', 'balance_paise', 'UPDATE'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'accounts', 'status', 'UPDATE'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'ledger_accounts', 'owner_user_id', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'ledger_accounts', 'kind', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'ledger_accounts', 'system_code', 'INSERT'
+                       )
+                   AND has_column_privilege(
+                           current_user, 'journal_transactions', 'initiated_by_user_id', 'INSERT'
+                       )
+                   AND NOT has_column_privilege(
+                           current_user, 'journal_transactions', 'status', 'INSERT'
+                       )
+                """
+            )
+        )
+        role_state = session.execute(
+            text(
+                """
+                SELECT rolsuper AS superuser, rolcreatedb, rolcreaterole,
+                       has_database_privilege(current_user, current_database(), 'CREATE')
+                           AS can_create_database_objects,
+                       has_schema_privilege(current_user, current_schema(), 'CREATE')
+                           AS can_create_in_schema,
+                       EXISTS (
+                           SELECT 1 FROM pg_auth_members
+                           WHERE member = current_user::regrole
+                       ) AS has_role_memberships
+                FROM pg_roles WHERE rolname = current_user
+                """
+            )
+        ).mappings().one()
+        assert not role_state["superuser"]
+        assert not role_state["rolcreatedb"]
+        assert not role_state["rolcreaterole"]
+        assert not role_state["can_create_database_objects"]
+        assert not role_state["can_create_in_schema"]
+        assert not role_state["has_role_memberships"]
+        assert session.scalar(
+            text(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = current_schema()
+                      AND c.relkind = 'S'
+                      AND has_sequence_privilege(current_user, c.oid, 'USAGE')
+                )
+                """
+            )
+        )
+
+
+def test_runtime_cannot_mutate_protected_records_or_ddl(
+    transaction_factory: sessionmaker[Session],
+) -> None:
+    protected_statements = (
+        "UPDATE alembic_version SET version_num = 'forbidden'",
+        "UPDATE audit_events SET outcome = outcome",
+        "DELETE FROM audit_events",
+        "UPDATE idempotency_records SET result_code = result_code",
+        "DELETE FROM idempotency_records",
+        "UPDATE journal_transactions SET amount_paise = amount_paise",
+        "DELETE FROM journal_transactions",
+        "UPDATE ledger_entries SET amount_paise = amount_paise",
+        "DELETE FROM ledger_entries",
+        "UPDATE ledger_accounts SET owner_user_id = owner_user_id",
+        "DELETE FROM ledger_accounts",
+    )
+    for statement in protected_statements:
+        _assert_permission_denied(transaction_factory, statement)
+
+    _assert_permission_denied(
+        transaction_factory,
+        f"CREATE SCHEMA ledgerline_forbidden_{uuid4().hex}",
+    )
+    _assert_permission_denied(
+        transaction_factory,
+        f"CREATE ROLE ledgerline_forbidden_{uuid4().hex}",
+    )
+
+
+def test_future_tables_do_not_receive_runtime_grants(
+    transaction_factory: sessionmaker[Session],
+) -> None:
+    with transaction_factory() as runtime_session:
+        schema = runtime_session.scalar(text("SELECT current_schema()"))
+    assert schema in _setup_factories
+    with _setup_factories[schema]() as setup_session:
+        setup_session.execute(
+            text(f'CREATE TABLE "{schema}".least_privilege_probe (id integer)')
+        )
+        setup_session.execute(
+            text(f'CREATE SEQUENCE "{schema}".least_privilege_probe_sequence')
+        )
+        setup_session.commit()
+
+    with transaction_factory() as session:
+        assert not session.scalar(
+            text(
+                """
+                SELECT has_table_privilege(
+                    current_user,
+                    format('%I.%I', CAST(:schema_name AS text), 'least_privilege_probe')::regclass,
+                    'SELECT'
+                )
+                """
+            ),
+            {"schema_name": schema},
+        )
+        assert session.scalar(
+            text(
+                """
+                SELECT NOT has_sequence_privilege(
+                           current_user,
+                           format(
+                               '%I.%I',
+                               CAST(:schema_name AS text),
+                               'least_privilege_probe_sequence'
+                           )::regclass,
+                           'USAGE'
+                       )
+                   AND NOT has_sequence_privilege(
+                           current_user,
+                           format(
+                               '%I.%I',
+                               CAST(:schema_name AS text),
+                               'least_privilege_probe_sequence'
+                           )::regclass,
+                           'SELECT'
+                       )
+                   AND NOT has_sequence_privilege(
+                           current_user,
+                           format(
+                               '%I.%I',
+                               CAST(:schema_name AS text),
+                               'least_privilege_probe_sequence'
+                           )::regclass,
+                           'UPDATE'
+                       )
+                """
+            ),
+            {"schema_name": schema},
+        )
+        assert not session.scalar(
+            text(
+                """
+                SELECT has_table_privilege(
+                    current_user,
+                    format('%I.%I', CAST(:schema_name AS text), 'least_privilege_probe')::regclass,
+                    'INSERT'
+                )
+                """
+            ),
+            {"schema_name": schema},
+        )
+
+
+def test_runtime_role_can_choose_account_owner_on_insert(
+    transaction_factory: sessionmaker[Session],
+) -> None:
+    actor = create_user(transaction_factory)
+    owner = create_user(transaction_factory)
+    assert actor.id != owner.id
+    ledger_account_id = uuid4()
+    account_id = uuid4()
+    account_number = f"LL{uuid4().int % 10_000_000_000:010d}"
+    with transaction_factory() as session:
+        session.execute(
+            text(
+                "INSERT INTO ledger_accounts (id, owner_user_id) "
+                "VALUES (:id, :owner_user_id)"
+            ),
+            {"id": ledger_account_id, "owner_user_id": owner.id},
+        )
+        session.execute(
+            text(
+                "INSERT INTO accounts (id, account_number, owner_user_id, ledger_account_id) "
+                "VALUES (:id, :account_number, :owner_user_id, :ledger_account_id)"
+            ),
+            {
+                "id": account_id,
+                "account_number": account_number,
+                "owner_user_id": owner.id,
+                "ledger_account_id": ledger_account_id,
+            },
+        )
+        session.commit()
+
+    with transaction_factory() as session:
+        assert session.scalar(
+            select(Account.owner_user_id).where(Account.id == account_id)
+        ) == owner.id
+
+
+def test_direct_balance_change_is_trigger_rejected_not_permission_denied(
+    transaction_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = transaction_client
+    owner = create_user(factory)
+    account_id = create_account(client, owner)
+    with factory() as session:
+        session.execute(
+            text("UPDATE accounts SET balance_paise = 100 WHERE id = :account_id"),
+            {"account_id": account_id},
+        )
+        with pytest.raises(DBAPIError) as error:
+            session.commit()
+        assert getattr(error.value.orig, "sqlstate", None) == "P0001"
+        session.rollback()
+
+    assert balance_for(factory, account_id) == 0
 
 
 def test_concurrent_withdrawals_cannot_overspend(
@@ -677,6 +1164,58 @@ def test_concurrent_transfers_cannot_overspend(
     ) == 700
 
 
+def test_concurrent_reversals_post_only_one_compensation(
+    transaction_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = transaction_client
+    owner = create_user(factory)
+    admin = create_user(factory, UserRole.ADMIN)
+    account_id = create_account(client, owner)
+    deposit = post_json(
+        client,
+        "/api/v1/transactions/deposits",
+        owner,
+        "concurrent-reversal-funding",
+        {"account_id": str(account_id), "amount_paise": 1_500},
+    )
+    transaction_id = deposit.json()["id"]
+
+    def reverse(key: str):
+        return post_json(
+            client,
+            f"/api/v1/transactions/{transaction_id}/reverse",
+            admin,
+            key,
+            {},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(reverse, ("concurrent-reversal-a", "concurrent-reversal-b"))
+        )
+
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    assert balance_for(factory, account_id) == 0
+    assert ledger_balance_for(factory, account_id) == 0
+    with factory() as session:
+        assert session.scalar(
+            select(func.count())
+            .select_from(JournalTransaction)
+            .where(
+                JournalTransaction.related_transaction_id == UUID(transaction_id)
+            )
+        ) == 1
+        assert session.scalar(
+            select(func.count())
+            .select_from(LedgerEntry)
+            .where(LedgerEntry.journal_transaction_id.in_(
+                select(JournalTransaction.id).where(
+                    JournalTransaction.related_transaction_id == UUID(transaction_id)
+                )
+            ))
+        ) == 2
+
+
 def test_concurrent_duplicate_idempotency_posts_once(
     transaction_client: tuple[TestClient, sessionmaker[Session]],
 ) -> None:
@@ -712,6 +1251,7 @@ def test_concurrent_duplicate_idempotency_posts_once(
             .where(
                 AuditEvent.actor_user_id == owner.id,
                 AuditEvent.outcome == "SUCCEEDED",
+                AuditEvent.event_type == "DEPOSIT",
             )
         ) == 1
 
@@ -756,21 +1296,9 @@ def test_database_commit_failure_rolls_back_balance_ledger_idempotency_and_audit
     transaction_client: tuple[TestClient, sessionmaker[Session]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, factory = transaction_client
+    client, factory = transaction_client
     owner = create_user(factory)
-    with factory() as session:
-        ledger = LedgerAccount(owner_user_id=owner.id)
-        session.add(ledger)
-        session.flush()
-        account = Account(
-            account_number=f"LL{uuid4().int % 10**10:010d}",
-            owner_user_id=owner.id,
-            ledger_account_id=ledger.id,
-            balance_paise=0,
-        )
-        session.add(account)
-        session.commit()
-        account_id = account.id
+    account_id = create_account(client, owner)
 
     def create_unbalanced_journal(
         db: Session,
@@ -804,8 +1332,9 @@ def test_database_commit_failure_rolls_back_balance_ledger_idempotency_and_audit
             )
         )
         db.flush()
-        journal.status = JournalTransactionStatus.POSTED
-        db.flush()
+        db.execute(
+            select(func.ledgerline_mark_journal_posted(journal.id))
+        )
         return journal
 
     monkeypatch.setattr(
@@ -849,7 +1378,10 @@ def test_database_commit_failure_rolls_back_balance_ledger_idempotency_and_audit
             .where(IdempotencyRecord.user_id == owner.id)
         ) == 0
         failure_audit = session.scalar(
-            select(AuditEvent).where(AuditEvent.actor_user_id == owner.id)
+            select(AuditEvent).where(
+                AuditEvent.actor_user_id == owner.id,
+                AuditEvent.event_type == "DEPOSIT_REJECTED",
+            )
         )
         assert failure_audit is not None
         assert failure_audit.outcome == "REJECTED"
@@ -858,7 +1390,7 @@ def test_database_commit_failure_rolls_back_balance_ledger_idempotency_and_audit
             select(func.count())
             .select_from(AuditEvent)
             .where(AuditEvent.actor_user_id == owner.id)
-        ) == 1
+        ) == 2
 
 
 def test_transaction_history_and_statement_are_owner_scoped(
@@ -898,8 +1430,8 @@ def test_transaction_history_and_statement_are_owner_scoped(
 def test_requests_validate_positive_paise_and_required_idempotency_key(
     transaction_client: tuple[TestClient, sessionmaker[Session]],
 ) -> None:
-    client, _ = transaction_client
-    owner = create_user(transaction_client[1])
+    client, factory = transaction_client
+    owner = create_user(factory)
     account_id = create_account(client, owner)
     zero = post_json(
         client,
@@ -922,6 +1454,18 @@ def test_requests_validate_positive_paise_and_required_idempotency_key(
         "fractional-amount",
         {"account_id": str(account_id), "amount_paise": 1.5},
     )
+    forged_fields = post_json(
+        client,
+        "/api/v1/transactions/deposits",
+        owner,
+        "forged-financial-fields",
+        {
+            "account_id": str(account_id),
+            "amount_paise": 1,
+            "owner_user_id": str(uuid4()),
+            "balance_paise": 9_999_999,
+        },
+    )
     missing_key = client.post(
         "/api/v1/transactions/deposits",
         headers=auth_headers(owner),
@@ -931,4 +1475,6 @@ def test_requests_validate_positive_paise_and_required_idempotency_key(
     assert zero.status_code == 422
     assert too_large.status_code == 422
     assert fractional.status_code == 422
+    assert forged_fields.status_code == 422
     assert missing_key.status_code == 422
+    assert balance_for(factory, account_id) == 0

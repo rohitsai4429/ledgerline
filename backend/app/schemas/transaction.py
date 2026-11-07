@@ -71,7 +71,7 @@ class AuditEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    actor_user_id: UUID
+    actor_user_id: UUID | None
     journal_transaction_id: UUID | None
     event_type: str
     outcome: str

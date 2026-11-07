@@ -265,3 +265,148 @@ scope documentation; no backend routes or financial API behavior were added.
 
 No backend suite was rerun for this frontend-only refinement. No Git commit or
 push was made.
+
+## Entry — LedgerLine Security and Financial-Integrity Review
+
+**Date:** 2026-11-07
+
+**Feature:** Remediate administrator audit gap and local PostgreSQL exposure
+
+**AI Tools:** Copilot SDK in VS Code; read-only security-review agent
+
+### Prompt Used
+
+> Perform a complete security audit of LedgerLine's backend, PostgreSQL
+> integrity controls, authentication and authorization, frontend, Docker
+> configuration, tests, and documentation. Report evidence-based threats,
+> fix confirmed issues where practical, create `THREATS.md`, run backend
+> PostgreSQL and frontend checks, do not expose credentials or reset/delete
+> database volumes, and do not commit or push.
+
+### Review Output and Human Decision
+
+The read-only review identified two medium-severity findings: administrator
+account-status changes had no audit event, and the local Compose database used
+the application superuser while publishing PostgreSQL on all host interfaces.
+The second risk was conditional on host reachability and credential compromise;
+the live configuration later confirmed the all-interface port binding and
+superuser runtime connection. The review also reiterated that deposits are
+synthetic internal ledger entries, not externally funded money.
+
+The project owner selected **“Fix all issues.”** No security-review commit was
+requested or created.
+
+### Implementation
+
+Account status updates now receive the authenticated administrator and record
+the account ID and previous/new states in an `ACCOUNT_STATUS_CHANGED` audit
+event in the same commit. A PostgreSQL regression assertion verifies the actor
+and transition details. The follow-up audit-coverage trace identified missing
+authentication, account-creation, and route-level denial records. Added
+credential-free audit events for registration/login outcomes, authentication
+and role denials, account creation, and rejected account-status changes.
+Anonymous-event actors are nullable; `AuditEventResponse` and the frontend now
+render them as unauthenticated. Events intentionally omit submitted email,
+password, and token values. Added PostgreSQL/SQLite regression assertions for
+the new event types and reversal audit outcomes.
+
+Compose now binds PostgreSQL to `127.0.0.1:5433`. Added a restricted
+`ledgerline_app` role provisioning script, with application DML grants and no
+superuser, database-create, role-create, or public-schema-create privileges.
+The existing local volume was preserved; the role was provisioned without
+dropping or resetting database objects. The local ignored `.env` was updated
+by adding the app secret and changing only the runtime/migration URLs; existing
+bootstrap credentials were preserved and never printed. Alembic and the
+PostgreSQL test fixture read the separate migration URL, which is not retained
+in the FastAPI `Settings` object. The test asserts that separation.
+
+Added `THREATS.md` with the threat register, attack scenarios, mitigations,
+verification evidence, and residual risks. Updated README setup guidance.
+Added additive migration `20261107_0004` to allow a nullable actor for
+unauthenticated security events. It was applied to the existing PostgreSQL
+database after confirming the prior revision `20261107_0003`; no tables or
+volumes were deleted or reset.
+
+### Verification
+
+- `backend\.venv\Scripts\python.exe -m pytest -q` — **38 passed**.
+  PostgreSQL account/transaction integration tests used the restricted
+  runtime role against PostgreSQL 17.11; authentication unit tests use
+  isolated SQLite. One existing Starlette `TestClient` deprecation warning
+  remains.
+- `backend\.venv\Scripts\alembic.exe check` — no new upgrade operations;
+  current revision is `20261107_0004`.
+- `docker compose config --quiet` passed. The database container is healthy
+  and publishes `127.0.0.1:5433->5432`. Live checks confirmed the runtime
+  connection is `ledgerline_app`, not a superuser, cannot create roles or
+  databases,   and has no `CREATE` privilege on `public`. Tightened the database grants so the
+  runtime role cannot update/delete user rows or change account ownership; its
+  account updates are limited to balance and status columns. Added a PostgreSQL
+  test that attempts these forbidden updates.
+- Frontend `npm run typecheck`, `npm run lint`, `npm test` (**16 passed across
+  8 files**), and `npm run build` passed. `npm audit --audit-level=moderate`
+  reported **0 vulnerabilities**.
+
+External firewall policy and production hosting were not assessed. No commit
+or push was made.
+
+## Entry — PostgreSQL Runtime Least-Privilege Hardening
+
+**Date:** 2026-11-07
+
+**Feature:** Restrict LedgerLine runtime database permissions
+
+**AI Tools:** Copilot SDK in VS Code
+
+### Prompt Used
+
+Inspect every application database write, replace broad runtime grants with
+the minimum permissions needed for authentication, accounts, posting,
+idempotency, and audit, correct default privileges, add an additive migration
+and adversarial PostgreSQL tests, preserve existing data and regressions, and
+document measured results and residual trust boundaries without exposing
+credentials.
+
+### Implementation
+
+Added migration `20261107_0005_runtime_privilege_hardening` after confirming
+the existing local database was PostgreSQL 17.11, database `ledgerline`,
+schema `public`, at revision `20261107_0004`, with consistent account/ledger
+ownership links. The migration adds no tables, revokes runtime access to
+`alembic_version`, and replaces broad table grants with table-level reads and
+column-limited writes. User inserts omit role/status and rely on defaults for
+`ACCOUNT_HOLDER` and `ACTIVE`. Account writes retain only account creation
+fields and updates to balance, status, and timestamp. Customer ledger
+insertion remains because account creation requires it; system clearing
+accounts remain migration-provisioned.
+
+Journal status changes and reversal row locking use two narrowly granted
+`SECURITY DEFINER` functions so the runtime role requires no journal
+`UPDATE` grant. Default table, sequence, and function privileges no longer
+grant future access to the runtime role. The role has no superuser, database
+creation, role creation, schema/database `CREATE`, or role-membership
+capability. Alembic now requires `MIGRATION_DATABASE_URL` and refuses to run as
+`ledgerline_app`. PostgreSQL fixtures create temporary schemas with the
+migration role for setup and exercise application operations using the actual
+restricted runtime credentials.
+
+### Verification
+
+- Applied `alembic upgrade head`; `alembic current` and `heads` report
+  `20261107_0005` as the sole head. `alembic check` reports no pending model
+  changes.
+- Full backend suite: `python -m pytest -q` — **44 passed**, one existing
+  Starlette `TestClient` deprecation warning. PostgreSQL account/transaction
+  tests use the runtime role and isolated schemas. Public-schema registration,
+  login, `/me`, account creation, and deposit smoke checks passed inside an
+  outer transaction that was rolled back.
+- Before/after public grant matrix and column-level write lists were measured
+  and recorded in README.md and THREATS.md. Live runtime SQL probes denied 16
+  forbidden operations with SQLSTATE `42501`; inconsistent direct balance
+  mutation was rejected by the balance trigger with SQLSTATE `P0001`.
+- A generated future table received no runtime grants. A direct SQL test also
+  confirmed the runtime role can assign a valid existing user's ID when
+  creating a new linked account/ledger pair; this remains an explicit
+  application-authorization trust boundary.
+- No database volume, existing table, or existing record was dropped or
+  reset. No commit or push was made.

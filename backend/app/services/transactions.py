@@ -22,6 +22,7 @@ from app.models.transaction import (
 from app.models.user import User, UserRole
 from app.repositories.transactions import list_audit_events, list_transactions
 from app.schemas.transaction import AccountStatementResponse, StatementEntry
+from app.services.audit import add_audit_event
 
 MAX_BALANCE_PAISE = 9_223_372_036_854_775_807
 IDEMPOTENCY_REJECTIONS = {
@@ -70,14 +71,13 @@ def _add_audit_event(
     details: dict[str, Any],
     journal_transaction_id: UUID | None = None,
 ) -> None:
-    db.add(
-        AuditEvent(
-            actor_user_id=actor.id,
-            journal_transaction_id=journal_transaction_id,
-            event_type=event_type,
-            outcome=outcome,
-            details=details,
-        )
+    add_audit_event(
+        db,
+        actor_user_id=actor.id,
+        event_type=event_type,
+        outcome=outcome,
+        details=details,
+        journal_transaction_id=journal_transaction_id,
     )
 
 
@@ -224,9 +224,7 @@ def _create_posted_journal(
 ) -> JournalTransaction:
     transaction = JournalTransaction(
         transaction_type=transaction_type,
-        status=JournalTransactionStatus.POSTING,
         amount_paise=amount_paise,
-        currency="INR",
         source_account_id=source_account_id,
         destination_account_id=destination_account_id,
         related_transaction_id=related_transaction_id,
@@ -241,14 +239,15 @@ def _create_posted_journal(
                 ledger_account_id=ledger_account_id,
                 entry_type=entry_type,
                 amount_paise=amount_paise,
-                currency="INR",
             )
             for ledger_account_id, entry_type in entries
         ]
     )
     db.flush()
-    transaction.status = JournalTransactionStatus.POSTED
-    db.flush()
+    db.execute(
+        select(func.ledgerline_mark_journal_posted(transaction.id))
+    )
+    db.refresh(transaction, attribute_names=["status"])
     return transaction
 
 
@@ -418,11 +417,10 @@ def reverse_transaction(
     def post() -> JournalTransaction:
         if actor.role is not UserRole.ADMIN:
             raise TransactionRejected("permission_denied")
-        original = db.scalar(
-            select(JournalTransaction)
-            .where(JournalTransaction.id == transaction_id)
-            .with_for_update()
+        db.execute(
+            select(func.ledgerline_lock_journal_for_reversal(transaction_id))
         )
+        original = db.get(JournalTransaction, transaction_id)
         if original is None:
             raise TransactionRejected("transaction_not_found")
         if (

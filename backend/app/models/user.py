@@ -45,7 +45,7 @@ class User(Base):
             values_callable=lambda role_enum: [role.value for role in role_enum],
         ),
         nullable=False,
-        default=UserRole.ACCOUNT_HOLDER,
+        server_default=text("'ACCOUNT_HOLDER'"),
     )
     status: Mapped[UserStatus] = mapped_column(
         Enum(
@@ -54,7 +54,7 @@ class User(Base):
             values_callable=lambda status_enum: [status.value for status in status_enum],
         ),
         nullable=False,
-        default=UserStatus.ACTIVE,
+        server_default=text("'ACTIVE'"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

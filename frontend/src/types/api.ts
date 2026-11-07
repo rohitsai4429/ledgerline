@@ -61,7 +61,7 @@ export interface AccountStatement {
 
 export interface AuditEvent {
   id: string
-  actor_user_id: string
+  actor_user_id: string | null
   journal_transaction_id: string | null
   event_type: string
   outcome: 'SUCCEEDED' | 'REJECTED'

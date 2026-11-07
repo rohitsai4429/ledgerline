@@ -82,9 +82,13 @@ pip install -r requirements.txt
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Set a local `POSTGRES_PASSWORD` in `.env`. Set `DATABASE_URL` to use the same
-password, URL-encoded for a PostgreSQL connection URL. Keep `.env` private; it
-is ignored by Git. The example file contains placeholders only.
+Set distinct local values for `POSTGRES_PASSWORD` and `APP_DB_PASSWORD`.
+`POSTGRES_PASSWORD` is for the local Compose bootstrap/migration role;
+`DATABASE_URL` must use the restricted `ledgerline_app` role and its
+`APP_DB_PASSWORD`. `MIGRATION_DATABASE_URL` uses the bootstrap role and is
+read only by Alembic. URL-encode credentials when they contain reserved URL
+characters. Keep `.env` private; it is ignored by Git. The example file
+contains placeholders only.
 
 Replace the example `JWT_SECRET_KEY` once with a locally generated secret.
 This writes it directly to the ignored `.env` file without printing it:
@@ -94,6 +98,9 @@ python -c "import secrets; from dotenv import set_key; set_key('.env', 'JWT_SECR
 ```
 
 An exported `DATABASE_URL` environment variable takes precedence over `.env`.
+Alembic and the PostgreSQL integration-test fixture read
+`MIGRATION_DATABASE_URL` separately; the FastAPI settings object does not load
+that privileged connection URL.
 
 Start PostgreSQL from `backend`:
 
@@ -102,9 +109,26 @@ docker compose up -d db
 docker compose ps
 ```
 
-Compose publishes PostgreSQL on host port `5433` (container port `5432`) to
-avoid conflicts with a PostgreSQL service already using `5432` on Windows.
-The application connects to `localhost:5433`.
+Compose binds PostgreSQL to `127.0.0.1:5433` (container port `5432`), avoiding
+conflicts with a PostgreSQL service already using `5432` on Windows without
+exposing the database on other host interfaces. The API connects to
+`127.0.0.1:5433` using the non-superuser `ledgerline_app` role. The bootstrap
+role remains privileged for local migrations only.
+
+On a new Docker volume the Compose initialization script creates the app role.
+For an existing volume, the init script is not rerun automatically. Preserve
+the volume and provision/update the restricted role once after updating `.env`
+and restarting the database service:
+
+```powershell
+docker compose up -d db
+docker compose exec -T db psql -U ledgerline_user -d ledgerline -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/10-create-app-role.sql
+```
+
+The script only creates or updates the `ledgerline_app` role and adjusts its
+least-privilege grants; it does not drop, recreate, or reset database objects
+or volumes. The runtime role cannot update user rows or account ownership and
+can update only account balance, status, and timestamp columns.
 
 Apply all additive database migrations (this does not reset or delete data):
 
@@ -154,11 +178,20 @@ Account APIs do not accept balance changes. All transaction amounts are
 positive integer paise in INR; multi-currency posting is not enabled.
 Auditors have read-only access.
 
-The three additive Alembic migrations are applied to the configured local
-database; current revision is `20261107_0003`. PostgreSQL schema comparison
-reports no pending model differences. On an existing Docker volume, changing
-`POSTGRES_PASSWORD` does not update the stored PostgreSQL role password;
-update it explicitly and keep `DATABASE_URL` synchronized.
+The audit log records successful account creation/status changes, authentication
+outcomes, authentication and role denials, and accepted/rejected financial
+service operations. Anonymous events have no actor UUID and store only a
+categorical reason plus request method/path; they do not store passwords,
+tokens, or submitted emails.
+
+The five additive Alembic migrations are applied to the configured local
+database; current revision is `20261107_0005`. PostgreSQL schema comparison
+reports no pending model differences. Alembic requires the separate
+`MIGRATION_DATABASE_URL` and refuses to run as `ledgerline_app`. On an existing Docker volume, changing
+`POSTGRES_PASSWORD` does not update the stored PostgreSQL role password.
+Keep `MIGRATION_DATABASE_URL` synchronized with that existing bootstrap role;
+the application itself must continue to use the restricted role in
+`DATABASE_URL`.
 
 ### Financial transaction API
 
@@ -215,15 +248,14 @@ write-once audit system is claimed.
 - Additive Alembic migrations for users, customer/system ledger accounts,
   journals, entries, idempotency records, and audit events.
 
-The current backend test suite has **36 passing tests**: 9 PostgreSQL account
-tests, 16 PostgreSQL financial transaction tests, 9 authentication tests using
-in-memory SQLite, and 2 health/CORS tests. Transaction integration and concurrency
-tests run against PostgreSQL in a generated temporary schema that is dropped
-after the test module; account tests use rollback. The shared `ledgerline`
-database is at revision `20261107_0003`; it contains only the two seeded
-clearing accounts and no test users, customer accounts, journals, entries,
-idempotency records, or audit events. Pytest emits one Starlette `TestClient`
-deprecation warning.
+The current backend test suite has **44 passing tests**: 10 PostgreSQL account
+tests, 22 PostgreSQL transaction/privilege tests, 9 authentication tests using
+in-memory SQLite, and 3 health/CORS tests. PostgreSQL integration tests use the
+actual restricted `ledgerline_app` credentials against generated temporary
+schemas that are dropped after testing. A separate public-schema smoke test
+successfully registered and authenticated a user, created an account, and
+posted a deposit within an outer transaction that was rolled back. No smoke
+data remained. Pytest emits one Starlette `TestClient` deprecation warning.
 
 ### Frontend product scope and limitations
 
@@ -289,6 +321,89 @@ without committing balance or ledger changes. These protections are not
 tamper-proof against privileged database operators. No external payment
 settlement, multi-currency processing, or cryptographic audit chain is
 implemented.
+
+### PostgreSQL runtime least privilege
+
+Migration `20261107_0005` was applied additively to PostgreSQL 17.11 on
+`ledgerline` after verifying the existing revision was `20261107_0004`, the
+database/schema target was `ledgerline.public`, and existing account-to-ledger
+ownership links were consistent. The migration did not drop or recreate
+tables, delete records, or reset the Docker volume.
+
+The measured table-level grants changed as follows:
+
+| Table | Before migration | After migration |
+|---|---|---|
+| `users` | `SELECT`, `INSERT` | `SELECT`; column-limited `INSERT` |
+| `accounts` | `SELECT`, `INSERT`; column-limited `UPDATE` | `SELECT`; column-limited `INSERT` and `UPDATE` |
+| `ledger_accounts` | `SELECT`, `INSERT`, `UPDATE` | `SELECT`; column-limited `INSERT` |
+| `journal_transactions` | `SELECT`, `INSERT`, `UPDATE` | `SELECT`; column-limited `INSERT` |
+| `ledger_entries` | `SELECT`, `INSERT`, `UPDATE` | `SELECT`; column-limited `INSERT` |
+| `idempotency_records` | `SELECT`, `INSERT`, `UPDATE` | `SELECT`; column-limited `INSERT` |
+| `audit_events` | `SELECT`, `INSERT`, `UPDATE` | `SELECT`; column-limited `INSERT` |
+| `alembic_version` | `SELECT`, `INSERT`, `UPDATE` | No runtime privileges |
+
+Column-level writes after the migration are exactly:
+
+- `users`: `INSERT (id, email, password_hash)`. Database defaults set
+  `role=ACCOUNT_HOLDER` and `status=ACTIVE`; role/status updates are not
+  granted.
+- `accounts`: `INSERT (id, account_number, owner_user_id, ledger_account_id)`;
+  `UPDATE (balance_paise, status, updated_at)`.
+- `ledger_accounts`: `INSERT (id, owner_user_id)`. System clearing ledgers are
+  provisioned by migrations; customer ledger rows are required by account
+  creation.
+- `journal_transactions`: `INSERT (id, transaction_type, amount_paise,
+  source_account_id, destination_account_id, related_transaction_id,
+  initiated_by_user_id)`. Posting status is database-defaulted and transitions
+  through a narrowly granted database function.
+- `ledger_entries`: `INSERT (id, journal_transaction_id, ledger_account_id,
+  entry_type, amount_paise)`.
+- `idempotency_records`: `INSERT (id, user_id, idempotency_key, request_hash,
+  outcome, journal_transaction_id, result_code)`.
+- `audit_events`: `INSERT (id, actor_user_id, journal_transaction_id,
+  event_type, outcome, details)`.
+
+The runtime has no sequence privileges, no `alembic_version` access, no
+database/schema `CREATE`, no superuser/database-creator/role-creator
+attributes, and no role memberships. The live default ACL no longer grants
+future tables or sequences to the runtime role. Before migration, the measured
+default ACL granted `INSERT/SELECT/UPDATE` on future tables and `SELECT/USAGE`
+on future sequences. Future migrations must add only explicitly justified
+grants. The two granted functions are the journal posting transition and the
+protected journal row lock used during reversal.
+
+Adversarial SQL checks against the live public schema were run as
+`ledgerline_app`: explicit ADMIN-user insertion, role/ownership changes,
+Alembic history changes, audit/idempotency/journal/ledger mutations, and schema
+or role creation each failed with PostgreSQL SQLSTATE `42501`. A direct
+inconsistent balance change reached the database consistency trigger and
+failed with `P0001`, distinguishing trigger rejection from permission denial.
+The PostgreSQL suite also confirmed that a future table receives no runtime
+grants.
+
+**Residual trust boundary:** account and customer-ledger inserts must include
+`owner_user_id` for normal account creation. A direct-SQL test confirmed the
+runtime role can choose an existing user's ID on a new account/ledger pair;
+the deferred trigger checks that the pair is linked and has matching owners,
+but cannot determine which authenticated application user initiated the SQL.
+The API must continue enforcing ownership and authorization. Likewise, the
+runtime role can issue account status updates and attempt balance updates on
+any row; database triggers reject balances inconsistent with ledger entries,
+but role-based authorization and audit attribution for status changes remain
+application responsibilities. Runtime credentials are therefore trusted
+backend credentials, not per-user database identities.
+
+Verification performed after migration:
+
+- `.\.venv\Scripts\alembic.exe current` and `heads` — `20261107_0005` is the
+  current revision and sole head.
+- `.\.venv\Scripts\alembic.exe check` — no new upgrade operations detected.
+- `.\.venv\Scripts\python.exe -m pytest -q` — **44 passed** (one existing
+  Starlette `TestClient` deprecation warning).
+- Direct SQL permission probes against the existing public schema — all 16
+  prohibited operations returned SQLSTATE `42501`; inconsistent balance
+  mutation was rejected by the database trigger with `P0001`.
 
 ## Documentation
 

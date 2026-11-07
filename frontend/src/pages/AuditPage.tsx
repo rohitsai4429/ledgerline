@@ -45,7 +45,7 @@ export function AuditPage() {
                 {(events.data ?? []).map((event) => (
                   <tr key={event.id}>
                     <td><div className="audit-event-name"><span className={`audit-dot audit-${event.outcome.toLowerCase()}`} /><strong>{event.event_type.replaceAll('_', ' ')}</strong></div></td>
-                    <td className="mono muted-cell">{event.actor_user_id}</td>
+                    <td className="mono muted-cell">{event.actor_user_id ?? 'Unauthenticated'}</td>
                     <td className="mono muted-cell">{event.journal_transaction_id ?? '—'}</td>
                     <td><StatusPill status={event.outcome} /></td>
                     <td className="date-cell">{new Date(event.created_at).toLocaleString('en-IN')}</td>

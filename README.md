@@ -2,10 +2,12 @@
 
 ### Money Movement with a Verifiable Ledger
 
-LedgerLine is a secure financial transaction management
-system designed to ensure accurate money movement,
-prevent duplicate transactions and maintain verifiable
-financial records.
+LedgerLine is a secure internal financial ledger platform designed to
+demonstrate reliable money movement, balanced accounting records and
+verifiable transaction history.
+
+> LedgerLine is a demonstration financial ledger. Transactions update internal
+> account records and do not move real money through banks or payment providers.
 
 ## Problem Statement
 
@@ -25,9 +27,16 @@ integrity, transaction consistency and auditability.
 
 ## User Roles
 
-1. Administrator
-2. Account Holder
-3. Auditor
+1. **Account holder** — manages owned accounts, makes internal deposits,
+   withdrawals and transfers, and reviews transactions and statements.
+2. **Administrator** — reviews all customer accounts and system-wide
+   transactions, manages account statuses, inspects audit events and can post
+   authorized transaction reversals.
+3. **Auditor** — read-only access to customer accounts, transaction history,
+   per-account debit/credit statement entries and audit events.
+
+Public registration always creates an account holder. Administrator/auditor
+provisioning is performed outside the public registration and frontend flows.
 
 ## Technology Stack
 
@@ -36,6 +45,8 @@ integrity, transaction consistency and auditability.
 - ORM and migrations: SQLAlchemy 2.x + Alembic
 - Validation and configuration: Pydantic
 - Testing: Pytest
+- Frontend: React, TypeScript, Vite, Tailwind CSS, TanStack Query, React Router,
+  React Hook Form, Zod, Lucide, Recharts, Vitest, and Testing Library
 
 ## Project Status
 
@@ -47,7 +58,7 @@ integrity, transaction consistency and auditability.
 - [x] Authentication
 - [x] Account management
 - [x] Deposits, withdrawals, and transfers
-- [ ] Frontend development
+- [x] Frontend development
 - [ ] Security testing
 - [ ] Deployment
 
@@ -204,15 +215,70 @@ write-once audit system is claimed.
 - Additive Alembic migrations for users, customer/system ledger accounts,
   journals, entries, idempotency records, and audit events.
 
-The current test suite has **35 passing tests**: 9 PostgreSQL account tests,
-16 PostgreSQL financial transaction tests, 9 authentication tests using
-in-memory SQLite, and 1 health test. Transaction integration and concurrency
+The current backend test suite has **36 passing tests**: 9 PostgreSQL account
+tests, 16 PostgreSQL financial transaction tests, 9 authentication tests using
+in-memory SQLite, and 2 health/CORS tests. Transaction integration and concurrency
 tests run against PostgreSQL in a generated temporary schema that is dropped
 after the test module; account tests use rollback. The shared `ledgerline`
 database is at revision `20261107_0003`; it contains only the two seeded
 clearing accounts and no test users, customer accounts, journals, entries,
 idempotency records, or audit events. Pytest emits one Starlette `TestClient`
 deprecation warning.
+
+### Frontend product scope and limitations
+
+The frontend is a role-aware client for internal LedgerLine accounting
+operations; it is not connected to a bank, UPI rail, card processor or external
+payment provider. Its login and registration pages, customer accounts and
+money-movement forms, transaction details, administrator controls, read-only
+auditor screens and API integration map are documented in
+[frontend/README.md](frontend/README.md).
+
+The current API provides per-account statements containing debit/credit
+entries, but no journal-wide raw-entry endpoint. Transaction history supports
+server-side account filtering and pagination; free-text and type filters in the
+frontend apply only to the currently loaded result page. Transfers use a
+recipient account UUID because there is no account-number lookup endpoint.
+Bearer JWTs are kept in browser memory because cookie authentication and token
+refresh are not supported. These frontend limitations are not replaced with
+mock data.
+
+### Frontend local run
+
+In a second PowerShell terminal while the backend and PostgreSQL are running:
+
+```powershell
+cd C:\Users\Rohith\ledgerline\frontend
+npm install
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+npm run dev
+```
+
+Set `VITE_API_BASE_URL` in the ignored frontend `.env` if the API is not at
+`http://127.0.0.1:8000`. For a separate frontend deployment, use the deployed
+API URL at build time and add the exact frontend origin to backend
+`CORS_ALLOWED_ORIGINS`; do not put credentials in `VITE_*` variables. Build
+with `npm run build` and configure the static host to serve `index.html` for
+application routes (the Netlify-compatible fallback is in
+`frontend/public/_redirects`).
+
+### Frontend
+
+The role-aware React application uses the live API only. Its exact endpoint,
+request, response, authorization, and error mapping plus authentication and
+local setup details are documented in [frontend/README.md](frontend/README.md).
+The UI includes login/registration, account-holder money movement, account and
+statement views, transaction history, administrator account/reversal controls,
+and read-only auditor screens. Bearer tokens remain in memory because the API
+does not support HttpOnly-cookie authentication or token refresh. Transaction
+retries preserve their exact payload and idempotency key after ambiguous
+failures.
+
+For frontend setup, start the API as described above, then run `npm install`,
+copy `frontend/.env.example` to `frontend/.env`, and run `npm run dev` from
+`frontend`. To validate changes, run `npm run lint`, `npm run typecheck`,
+`npm test`, and `npm run build` in that directory. Verification results for the
+current frontend implementation are recorded in [PROMPTS.md](PROMPTS.md).
 
 ## Security and Integrity
 
@@ -268,6 +334,6 @@ LedgerLine follows a Modular Monolithic Architecture.
 - [x] Authentication
 - [x] Account management
 - [x] Deposits, withdrawals, and transfers
-- [ ] Frontend development
+- [x] Frontend development
 - [ ] Security testing
 - [ ] Deployment

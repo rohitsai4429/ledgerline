@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -126,6 +127,7 @@ def create_user(
         user = User(
             email=f"{uuid4().hex}@transactions.test",
             password_hash=hash_password("test-only financial transaction password"),
+            email_verified_at=datetime.now(timezone.utc),
             role=role,
             status=UserStatus.ACTIVE,
         )

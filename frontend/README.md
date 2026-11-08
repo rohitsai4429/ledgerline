@@ -61,8 +61,11 @@ and amounts are not rounded by JavaScript number parsing.
 
 | Method and endpoint | Request | Response used by the app | Access and relevant errors |
 |---|---|---|---|
-| `POST /api/v1/auth/register` | `{email, password}` | Safe user profile (`id`, `email`, `role`, `status`, `created_at`) | Public; always `ACCOUNT_HOLDER`; `409` duplicate email, `422` invalid input |
-| `POST /api/v1/auth/login` | `{email, password}` | `{access_token, token_type, expires_in}` | Public; `401` invalid credentials, `403` disabled user, `422` invalid input |
+| `POST /api/v1/auth/register` | `{email, password}` | OTP challenge (`challenge_id`, expiry and resend interval) | Public; always `ACCOUNT_HOLDER`; `422` invalid input |
+| `POST /api/v1/auth/login` | `{email, password}` | OTP challenge; never a LedgerLine token | Public; `401` invalid credentials, `403` disabled user, `422` invalid input |
+| `POST /api/v1/auth/google` | `{credential, confirm_account_link?}` | OTP challenge or explicit account-link confirmation | Public; backend verifies the signed Google ID token; `401` invalid credential |
+| `POST /api/v1/auth/otp/verify` | `{challenge_id, code}` | `{access_token, token_type, expires_in}` | Public; token is issued only after a valid single-use code |
+| `POST /api/v1/auth/otp/resend` | `{challenge_id}` | Resend cooldown status | Public; subject to cooldown and hourly limits |
 | `GET /api/v1/auth/me` | None | Safe user profile | Bearer auth; `401` invalid/expired token or unavailable user |
 | `POST /api/v1/accounts` | Empty JSON object | Account including account number, status, integer-paise balance, ledger account ID, timestamps | Account holder; `201`; `403` wrong role, `422` writable fields rejected, `503` account number unavailable |
 | `GET /api/v1/accounts` | None | Array of accounts | Authenticated; holder sees own accounts, admin/auditor see all; `401` unauthenticated |
@@ -85,13 +88,14 @@ The key is not regenerated for an ambiguous retry.
 
 ## Authentication and authorization notes
 
-The API currently issues bearer JWTs and has no HttpOnly-cookie or token-refresh
-endpoint. The frontend keeps the access token in JavaScript memory only; a page
-reload requires signing in again. It does not use `localStorage` or claim
-memory-only storage prevents XSS. All role guards in React are for navigation
-and user experience; the backend remains the authorization boundary.
-Registration never accepts a role. No password, access token, or API secret is
-written to logs or frontend configuration.
+Password registration/login and Google Identity Services all require an
+eight-digit email OTP before the API installs a LedgerLine bearer JWT. Google
+uses the public build-time `VITE_GOOGLE_CLIENT_ID`; backend-only credentials
+must never be put in a `VITE_` variable. The frontend keeps the LedgerLine
+access token in JavaScript memory only; a page reload requires signing in
+again. It does not use `localStorage` or claim memory-only storage prevents
+XSS. All role guards in React are for navigation and user experience; the
+backend remains the authorization boundary. Registration never accepts a role.
 
 There is no raw journal-line endpoint. The app uses the account statement's
 actual entries for ledger details, the transaction-history endpoint for

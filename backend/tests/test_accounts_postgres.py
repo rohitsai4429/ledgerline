@@ -1,11 +1,14 @@
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +21,7 @@ from app.main import app
 from app.models.account import Account, AccountStatus, LedgerAccount
 from app.models.transaction import AuditEvent
 from app.models.user import User, UserRole, UserStatus
+from app.services import otp
 
 _setup_factories: dict[str, sessionmaker[Session]] = {}
 
@@ -117,6 +121,7 @@ def create_user(factory: sessionmaker[Session], email: str, role: UserRole) -> U
         user = User(
             email=email,
             password_hash=hash_password("postgres integration test password"),
+            email_verified_at=datetime.now(timezone.utc),
             role=role,
             status=UserStatus.ACTIVE,
         )
@@ -174,38 +179,78 @@ def test_account_creation_generates_number_and_linked_zero_balance(
 
 def test_registration_login_and_current_user_work_with_runtime_grants(
     postgres_client: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, factory = postgres_client
     email = f"{uuid4().hex}@example.com"
     password = "postgres-only integration password"
+    delivered_codes: list[str] = []
+
+    def capture_otp(_email: str, code: str) -> None:
+        delivered_codes.append(code)
+
+    monkeypatch.setattr(
+        otp,
+        "get_settings",
+        lambda: SimpleNamespace(
+            otp_hmac_secret=SecretStr("test-otp-secret-" + "x" * 32)
+        ),
+    )
+    monkeypatch.setattr(otp, "send_otp_email", capture_otp)
 
     registration = client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password},
     )
-    assert registration.status_code == 201
-    assert registration.json()["role"] == UserRole.ACCOUNT_HOLDER.value
-    assert registration.json()["status"] == UserStatus.ACTIVE.value
+    assert registration.status_code == 202
+    assert registration.json()["status"] == "OTP_REQUIRED"
+    assert "access_token" not in registration.json()
+    assert len(delivered_codes) == 1
+    registration_verification = client.post(
+        "/api/v1/auth/otp/verify",
+        json={
+            "challenge_id": registration.json()["challenge_id"],
+            "code": delivered_codes[-1],
+        },
+    )
+    assert registration_verification.status_code == 200
 
+    monkeypatch.setattr(
+        otp,
+        "_now",
+        lambda: datetime.now(timezone.utc) + timedelta(seconds=61),
+    )
     login = client.post(
         "/api/v1/auth/login",
         json={"email": email, "password": password},
     )
-    assert login.status_code == 200
-    token = login.json()["access_token"]
+    assert login.status_code == 202
+    assert login.json()["status"] == "OTP_REQUIRED"
+    assert "access_token" not in login.json()
+    assert len(delivered_codes) == 2
+    login_verification = client.post(
+        "/api/v1/auth/otp/verify",
+        json={
+            "challenge_id": login.json()["challenge_id"],
+            "code": delivered_codes[-1],
+        },
+    )
+    assert login_verification.status_code == 200
+    token = login_verification.json()["access_token"]
     profile = client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert profile.status_code == 200
-    assert profile.json()["id"] == registration.json()["id"]
     assert "password_hash" not in profile.json()
 
     with factory() as session:
         user = session.scalar(select(User).where(User.email == email))
         assert user is not None
+        assert profile.json()["id"] == str(user.id)
         assert user.role is UserRole.ACCOUNT_HOLDER
         assert user.status is UserStatus.ACTIVE
+        assert user.email_verified_at is not None
         assert session.scalar(
             select(AuditEvent).where(
                 AuditEvent.actor_user_id == user.id,

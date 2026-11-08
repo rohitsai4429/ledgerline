@@ -63,6 +63,8 @@ def get_current_user(
     user = get_user_by_id(db, user_id)
     if user is None or user.status is UserStatus.DISABLED:
         _reject_authentication(db, request, "user_unavailable")
+    if user.email_verified_at is None:
+        _reject_authentication(db, request, "email_unverified")
     return user
 
 

@@ -31,7 +31,14 @@ function renderAdminRoute() {
 
 describe('role gates', () => {
   it('redirects an auditor away from administrator controls', () => {
-    vi.mocked(useAuth).mockReturnValue({ user, busy: false, signIn: vi.fn(), signOut: vi.fn() })
+    vi.mocked(useAuth).mockReturnValue({
+      user,
+      busy: false,
+      signIn: vi.fn(),
+      startGoogleSignIn: vi.fn(),
+      verifyOtp: vi.fn(),
+      signOut: vi.fn(),
+    })
     renderAdminRoute()
 
     expect(screen.getByText('Overview')).toBeInTheDocument()

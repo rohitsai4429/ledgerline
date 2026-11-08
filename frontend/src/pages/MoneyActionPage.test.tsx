@@ -81,6 +81,8 @@ beforeEach(() => {
     },
     busy: false,
     signIn: vi.fn(),
+    startGoogleSignIn: vi.fn(),
+    verifyOtp: vi.fn(),
     signOut: vi.fn(),
   })
   vi.mocked(accountsApi.list).mockResolvedValue([account])

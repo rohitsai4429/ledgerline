@@ -151,16 +151,29 @@ python -m pytest
 
 Authentication endpoints:
 
-- `POST /api/v1/auth/register` — public registration; always creates an
-  `ACCOUNT_HOLDER`.
-- `POST /api/v1/auth/login` — verifies credentials and returns a short-lived
-  bearer token.
+- `POST /api/v1/auth/register` — creates an `ACCOUNT_HOLDER` and starts email
+  verification; it never returns a LedgerLine token.
+- `POST /api/v1/auth/login` — verifies the password and starts email
+  verification; it never returns a LedgerLine token.
+- `POST /api/v1/auth/google` — verifies a Google ID token; an existing matching
+  password account requires explicit link confirmation and email OTP.
+- `POST /api/v1/auth/otp/verify` — consumes an eight-digit single-use code and
+  returns the LedgerLine bearer token only after successful verification.
+- `POST /api/v1/auth/otp/resend` — resends a code subject to the 60-second
+  cooldown and per-user hourly limit.
 - `GET /api/v1/auth/me` — returns the authenticated user's safe profile.
 
 Passwords must be at least 12 characters. Registration does not accept a
 caller-supplied role; administrative account provisioning is not implemented.
-The authentication migration creates the users table and normalized-email
-uniqueness constraint.
+OTP codes expire after five minutes, allow at most five attempts, and are
+stored only as HMAC digests. Resends have a 60-second cooldown and a limit of
+five per account per hour. Configure `OTP_HMAC_SECRET`, `RESEND_API_KEY`,
+`RESEND_FROM_EMAIL`, and `GOOGLE_CLIENT_ID` in the backend environment. Set
+`VITE_GOOGLE_CLIENT_ID` in the frontend build environment; it is a public client
+identifier, not a secret. Never put backend credentials in a `VITE_` variable.
+Authentication migration `20261108_0006` adds verified-email state, Google
+identity mappings, and persistent OTP challenges while preserving existing
+accounts as verified.
 
 Account management endpoints:
 
@@ -184,8 +197,9 @@ service operations. Anonymous events have no actor UUID and store only a
 categorical reason plus request method/path; they do not store passwords,
 tokens, or submitted emails.
 
-The five additive Alembic migrations are applied to the configured local
-database; current revision is `20261107_0005`. PostgreSQL schema comparison
+The additive Alembic migrations are applied to the configured local
+database; authentication migration `20261108_0006` follows
+`20261107_0005`. PostgreSQL schema comparison
 reports no pending model differences. Alembic requires the separate
 `MIGRATION_DATABASE_URL` and refuses to run as `ledgerline_app`. On an existing Docker volume, changing
 `POSTGRES_PASSWORD` does not update the stored PostgreSQL role password.
@@ -234,7 +248,8 @@ write-once audit system is claimed.
 - PostgreSQL 17 development database configured through Docker Compose on
   host port `5433`; SQLAlchemy TCP connectivity was verified.
 - Authentication with normalized unique emails, Argon2 password hashing,
-  account status checks, signed expiring JWTs, and role authorization.
+  Google identity verification, HMAC-digested email OTP, signed expiring JWTs,
+  account status checks, and role authorization.
 - Public registration always assigns `ACCOUNT_HOLDER`; callers cannot set
   their own role.
 - Account management with generated account numbers, owner-scoped access,
@@ -246,15 +261,12 @@ write-once audit system is claimed.
   internal transfers, admin reversals, transaction history, statements, and
   operation audits.
 - Additive Alembic migrations for users, customer/system ledger accounts,
-  journals, entries, idempotency records, and audit events.
+  journals, entries, idempotency records, audit events, Google identities, and
+  email OTP challenges.
 
-The backend suite currently collects **61 tests**, including PostgreSQL
-account and transaction/privilege tests, authentication tests, and health/CORS
-tests. In the current local verification, all 28 non-PostgreSQL tests passed.
-The 33 PostgreSQL tests use the restricted `ledgerline_app` credentials
-against temporary schemas; they require PostgreSQL and could not run because
-Docker Desktop was unavailable. Pytest emits one Starlette `TestClient`
-deprecation warning.
+The focused authentication tests for this change passed (27 backend and 7
+frontend tests). The full backend suite and PostgreSQL integration tests were
+not run for this authentication change.
 
 ### Frontend product scope and limitations
 
@@ -544,7 +556,12 @@ Render.
 | Render API | `APP_NAME` | Optional; defaults to `LedgerLine API` |
 | Render API | `JWT_ALGORITHM` | Optional; defaults to `HS256` |
 | Render API | `JWT_ACCESS_TOKEN_MINUTES` | Optional; defaults to `30` |
+| Render API | `GOOGLE_CLIENT_ID` | Google Identity Services Web Client ID |
+| Render API | `OTP_HMAC_SECRET` | Unique random secret, at least 32 characters |
+| Render API | `RESEND_API_KEY` | Backend-only Resend API credential |
+| Render API | `RESEND_FROM_EMAIL` | Verified sender address for OTP messages |
 | Render Static Site build | `VITE_API_BASE_URL` | `https://ledgerline-api.onrender.com` if assigned; otherwise the exact Dashboard API URL, no trailing slash |
+| Render Static Site build | `VITE_GOOGLE_CLIENT_ID` | Public Google Identity Services Web Client ID; must match backend `GOOGLE_CLIENT_ID` |
 | Local migration/provision/bootstrap process only | `MIGRATION_DATABASE_URL` | Neon direct migration-owner URL; never configured on Render |
 
 `backend/app/core/config.py` loads runtime settings from the API process

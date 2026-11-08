@@ -23,7 +23,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = useCallback(async (credentials: Credentials) => {
     setBusy(true)
     try {
-      const token = await authApi.login(credentials)
+      return await authApi.login(credentials)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const startGoogleSignIn = useCallback(async (
+    credential: string,
+    confirmAccountLink = false,
+  ) => {
+    setBusy(true)
+    try {
+      return await authApi.google(credential, confirmAccountLink)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const verifyOtp = useCallback(async (challengeId: string, code: string) => {
+    setBusy(true)
+    try {
+      const token = await authApi.verifyOtp(challengeId, code)
       setAccessToken(token.access_token, token.expires_in)
       const profile = await authApi.me()
       setUser(profile)
@@ -44,8 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient])
 
   const value = useMemo(
-    () => ({ user, busy, signIn, signOut }),
-    [user, busy, signIn, signOut],
+    () => ({ user, busy, signIn, startGoogleSignIn, verifyOtp, signOut }),
+    [user, busy, signIn, startGoogleSignIn, verifyOtp, signOut],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

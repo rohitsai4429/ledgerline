@@ -66,7 +66,7 @@ def register_user(db: Session, email: str, password: str) -> User:
 
 def authenticate_user(db: Session, email: str, password: str) -> User:
     user = get_user_by_email(db, email.strip().lower())
-    if user is None or not verify_password(password, user.password_hash):
+    if user is None or user.password_hash is None or not verify_password(password, user.password_hash):
         add_audit_event(
             db,
             actor_user_id=None,

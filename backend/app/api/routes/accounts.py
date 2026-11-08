@@ -6,9 +6,16 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
 from app.database.session import get_db
-from app.models.account import Account
+from app.models.account import Account, AccountStatus
 from app.models.user import User, UserRole
-from app.schemas.account import AccountCreateRequest, AccountResponse, AccountStatusUpdate
+from app.repositories.accounts import get_account_by_number
+from app.schemas.account import (
+    AccountCreateRequest,
+    AccountResponse,
+    AccountStatusUpdate,
+    RecipientLookupRequest,
+    RecipientLookupResponse,
+)
 from app.services.accounts import (
     AccountNumberGenerationError,
     AccountNotFoundError,
@@ -20,6 +27,26 @@ from app.services.accounts import (
 )
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
+
+
+@router.post("/recipient-lookup", response_model=RecipientLookupResponse)
+def lookup_recipient_account(
+    payload: RecipientLookupRequest,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ACCOUNT_HOLDER))],
+    db: Annotated[Session, Depends(get_db)],
+) -> RecipientLookupResponse:
+    account = get_account_by_number(db, payload.account_number)
+    if account is None or account.status is not AccountStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recipient account not found or unavailable",
+        )
+
+    return RecipientLookupResponse(
+        destination_account_id=account.id,
+        masked_account_number=f"{'*' * (len(account.account_number) - 4)}{account.account_number[-4:]}",
+        status=account.status,
+    )
 
 
 @router.post(

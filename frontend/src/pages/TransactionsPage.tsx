@@ -192,8 +192,16 @@ export function TransactionsPage() {
               <div><dt>Amount</dt><dd>{formatPaise(selectedForDetails.amount_paise)} {selectedForDetails.currency}</dd></div>
               <div><dt>Status</dt><dd><StatusPill status={selectedForDetails.status} /></dd></div>
               <div><dt>Created</dt><dd>{formatDate(selectedForDetails.created_at)}</dd></div>
-              <div><dt>Source account ID</dt><dd className="mono">{selectedForDetails.source_account_id ?? 'Internal clearing account'}</dd></div>
-              <div><dt>Destination account ID</dt><dd className="mono">{selectedForDetails.destination_account_id ?? 'Internal clearing account'}</dd></div>
+              <div><dt>Source account</dt><dd>
+                {selectedForDetails.source_account_id
+                  ? accounts.data?.find((account) => account.id === selectedForDetails.source_account_id)?.account_number ?? 'Other LedgerLine account'
+                  : 'Internal clearing account'}
+              </dd></div>
+              <div><dt>Destination account</dt><dd>
+                {selectedForDetails.destination_account_id
+                  ? accounts.data?.find((account) => account.id === selectedForDetails.destination_account_id)?.account_number ?? 'Other LedgerLine account'
+                  : 'Internal clearing account'}
+              </dd></div>
               <div><dt>Original reference</dt><dd className="mono">{selectedForDetails.related_transaction_id ?? '—'}</dd></div>
               <div><dt>Reversal reference</dt><dd className="mono">
                 {pageTransactions.find((transaction) => transaction.related_transaction_id === selectedForDetails.id)?.id ?? '—'}

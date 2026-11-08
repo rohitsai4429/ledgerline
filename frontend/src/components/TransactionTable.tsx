@@ -14,7 +14,7 @@ function transactionIcon(type: Transaction['transaction_type']) {
 
 function accountReference(id: string | null, accounts: Account[]): string {
   if (!id) return 'Clearing account'
-  return accounts.find((account) => account.id === id)?.account_number ?? id.slice(0, 8)
+  return accounts.find((account) => account.id === id)?.account_number ?? 'Other LedgerLine account'
 }
 
 export function TransactionTable({
@@ -58,7 +58,7 @@ export function TransactionTable({
                   </span>
                 </div>
               </td>
-              <td className="muted-cell" title={`${transaction.source_account_id ?? 'Internal clearing account'} → ${transaction.destination_account_id ?? 'Internal clearing account'}`}>
+              <td className="muted-cell">
                 {transaction.source_account_id
                   ? accountReference(transaction.source_account_id, accounts)
                   : 'Clearing'}{' '}

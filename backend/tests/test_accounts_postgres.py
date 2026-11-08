@@ -254,6 +254,90 @@ def test_account_holder_can_only_list_and_read_owned_accounts(
     assert other_detail.status_code == 404
 
 
+def test_recipient_lookup_returns_only_active_account_transfer_details(
+    postgres_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = postgres_client
+    sender = create_user(factory, "recipient-lookup-sender@example.com", UserRole.ACCOUNT_HOLDER)
+    recipient = create_user(factory, "recipient-lookup-recipient@example.com", UserRole.ACCOUNT_HOLDER)
+    recipient_account = create_account(client, recipient)
+
+    response = client.post(
+        "/api/v1/accounts/recipient-lookup",
+        headers=headers_for(sender),
+        json={"account_number": recipient_account["account_number"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "destination_account_id": recipient_account["id"],
+        "masked_account_number": f"********{recipient_account['account_number'][-4:]}",
+        "status": AccountStatus.ACTIVE.value,
+    }
+
+
+def test_recipient_lookup_rejects_missing_or_unknown_account_number(
+    postgres_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = postgres_client
+    sender = create_user(factory, "recipient-lookup-missing@example.com", UserRole.ACCOUNT_HOLDER)
+    headers = headers_for(sender)
+
+    missing = client.post("/api/v1/accounts/recipient-lookup", headers=headers, json={})
+    unknown = client.post(
+        "/api/v1/accounts/recipient-lookup",
+        headers=headers,
+        json={"account_number": "LL9999999999"},
+    )
+
+    assert missing.status_code == 422
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"] == "Recipient account not found or unavailable"
+
+
+def test_recipient_lookup_rejects_inactive_accounts(
+    postgres_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = postgres_client
+    sender = create_user(factory, "recipient-lookup-inactive-sender@example.com", UserRole.ACCOUNT_HOLDER)
+    recipient = create_user(factory, "recipient-lookup-inactive-recipient@example.com", UserRole.ACCOUNT_HOLDER)
+    admin = create_user(factory, "recipient-lookup-inactive-admin@example.com", UserRole.ADMIN)
+    recipient_account = create_account(client, recipient)
+    changed = client.patch(
+        f"/api/v1/accounts/{recipient_account['id']}/status",
+        headers=headers_for(admin),
+        json={"status": AccountStatus.FROZEN.value},
+    )
+
+    response = client.post(
+        "/api/v1/accounts/recipient-lookup",
+        headers=headers_for(sender),
+        json={"account_number": recipient_account["account_number"]},
+    )
+
+    assert changed.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Recipient account not found or unavailable"
+
+
+def test_recipient_lookup_requires_an_authenticated_account_holder(
+    postgres_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, factory = postgres_client
+    admin = create_user(factory, "recipient-lookup-admin@example.com", UserRole.ADMIN)
+    payload = {"account_number": "LL9999999999"}
+
+    unauthenticated = client.post("/api/v1/accounts/recipient-lookup", json=payload)
+    forbidden = client.post(
+        "/api/v1/accounts/recipient-lookup",
+        headers=headers_for(admin),
+        json=payload,
+    )
+
+    assert unauthenticated.status_code == 401
+    assert forbidden.status_code == 403
+
+
 def test_admin_and_auditor_can_read_all_accounts(
     postgres_client: tuple[TestClient, sessionmaker[Session]],
 ) -> None:

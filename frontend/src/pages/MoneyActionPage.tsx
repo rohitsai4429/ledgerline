@@ -5,9 +5,9 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 import { transactionsApi } from '../api/transactions'
 import { useAuth } from '../auth/AuthContext'
-import { Alert, Button, Card, FieldError, Loading, PageHeader, ProductDisclosure } from '../components/ui'
-import { useAccounts, useInvalidateLedger } from '../hooks/useLedgerData'
-import type { Account, TransactionType } from '../types/api'
+import { Alert, Button, Card, FieldError, Loading, PageHeader, ProductDisclosure, StatusPill } from '../components/ui'
+import { useAccounts, useInvalidateLedger, useLookupRecipient } from '../hooks/useLedgerData'
+import type { Account, Transaction } from '../types/api'
 import { formatPaise, transactionLabel } from '../utils/format'
 import { executeIdempotently } from '../utils/idempotency'
 
@@ -21,23 +21,24 @@ const amountSchema = z.string()
   .refine((value) => Number.isSafeInteger(value * 100), 'Amount exceeds the supported precision')
   .transform((value) => Math.round(value * 100))
 
-function createActionSchema(action: Action) {
+function createActionSchema() {
   return z.object({
     account_id: z.string().uuid('Choose an account'),
     amount: amountSchema,
-    destination_account_id: z.string().optional(),
-  }).superRefine((values, context) => {
-    if (action === 'TRANSFER') {
-    const parsed = z.string().uuid().safeParse(values.destination_account_id)
-    if (!parsed.success) {
-      context.addIssue({
-        code: 'custom',
-        path: ['destination_account_id'],
-        message: 'Enter a valid recipient account ID',
-      })
-    }
-    }
   })
+}
+
+type VerifiedRecipient = {
+  accountNumber: string
+  destination_account_id: string
+  masked_account_number: string
+  status: Account['status']
+}
+
+type TransactionResult = {
+  transaction: Transaction
+  sourceAccountNumber: string | null
+  maskedDestinationAccountNumber: string | null
 }
 
 const actionCopy: Record<Action, { title: string; description: string; icon: typeof ArrowDownLeft; eyebrow: string }> = {
@@ -69,16 +70,24 @@ export function MoneyActionPage({ action }: { action: Action }) {
   const { user } = useAuth()
   const accountQuery = useAccounts()
   const invalidate = useInvalidateLedger()
+  const lookupRecipient = useLookupRecipient()
   const { title, description, icon: Icon, eyebrow } = actionCopy[action]
-  const schema = createActionSchema(action)
-  const [result, setResult] = useState<{ id: string; type: TransactionType } | null>(null)
+  const schema = createActionSchema()
+  const [result, setResult] = useState<TransactionResult | null>(null)
   const [requestError, setRequestError] = useState('')
+  const [balanceRefreshError, setBalanceRefreshError] = useState('')
+  const [recipientError, setRecipientError] = useState('')
+  const [recipientAccountNumber, setRecipientAccountNumber] = useState('')
+  const [verifiedRecipient, setVerifiedRecipient] = useState<VerifiedRecipient | null>(null)
   const [pendingValues, setPendingValues] = useState<z.output<typeof schema> | null>(null)
+  const [pendingRecipient, setPendingRecipient] = useState<VerifiedRecipient | null>(null)
   const [isPosting, setIsPosting] = useState(false)
+  const postingRef = useRef(false)
+  const lookupGeneration = useRef(0)
   const confirmationRef = useRef<HTMLElement | null>(null)
   const form = useForm<z.input<typeof schema>, unknown, z.output<typeof schema>>({
     resolver: zodResolver(schema),
-    defaultValues: { account_id: '', amount: '', destination_account_id: '' },
+    defaultValues: { account_id: '', amount: '' },
   })
   const accounts = selectableAccounts(accountQuery.data ?? [])
   const selectedAccountId = useWatch({ control: form.control, name: 'account_id' })
@@ -113,13 +122,52 @@ export function MoneyActionPage({ action }: { action: Action }) {
   }, [pendingValues, isPosting])
 
   function submit(values: z.output<typeof schema>) {
+    if (action === 'TRANSFER') {
+      if (!verifiedRecipient || verifiedRecipient.accountNumber !== recipientAccountNumber.trim()) {
+        setRecipientError('Verify the recipient account before reviewing the transfer.')
+        return
+      }
+      if (verifiedRecipient.destination_account_id === values.account_id) {
+        setRecipientError('Choose a different source account and recipient account.')
+        return
+      }
+      setPendingRecipient(verifiedRecipient)
+    } else {
+      setPendingRecipient(null)
+    }
     setRequestError('')
+    setBalanceRefreshError('')
     setResult(null)
     setPendingValues(values)
   }
 
+  async function verifyRecipient() {
+    const accountNumber = recipientAccountNumber.trim()
+    if (!/^LL\d{10}$/.test(accountNumber)) {
+      setVerifiedRecipient(null)
+      setRecipientError('Enter a valid LedgerLine account number.')
+      return
+    }
+
+    const generation = ++lookupGeneration.current
+    setVerifiedRecipient(null)
+    setRecipientError('')
+    try {
+      const recipient = await lookupRecipient.mutateAsync({ account_number: accountNumber })
+      if (lookupGeneration.current === generation) {
+        setVerifiedRecipient({ ...recipient, accountNumber })
+      }
+    } catch (error) {
+      if (lookupGeneration.current === generation) {
+        setRecipientError(error instanceof Error ? error.message : 'Recipient verification failed.')
+      }
+    }
+  }
+
   async function confirmTransaction() {
-    if (!user || !pendingValues) return
+    if (!user || !pendingValues || postingRef.current) return
+    if (action === 'TRANSFER' && !pendingRecipient) return
+    postingRef.current = true
     setIsPosting(true)
     setRequestError('')
     const values = pendingValues
@@ -127,7 +175,7 @@ export function MoneyActionPage({ action }: { action: Action }) {
     const payload = action === 'TRANSFER'
       ? {
           source_account_id: values.account_id,
-          destination_account_id: values.destination_account_id ?? '',
+          destination_account_id: pendingRecipient?.destination_account_id ?? '',
           amount_paise: amountPaise,
         }
       : { account_id: values.account_id, amount_paise: amountPaise }
@@ -153,20 +201,33 @@ export function MoneyActionPage({ action }: { action: Action }) {
           return transactionsApi.transfer(
             {
               source_account_id: values.account_id,
-              destination_account_id: values.destination_account_id ?? '',
+              destination_account_id: pendingRecipient?.destination_account_id ?? '',
               amount_paise: amountPaise,
             },
             key,
           )
         },
       )
-      invalidate()
-      setResult({ id: transaction.id, type: transaction.transaction_type })
+      const sourceAccount = accountQuery.data?.find((account) => account.id === values.account_id)
+      setResult({
+        transaction,
+        sourceAccountNumber: sourceAccount?.account_number ?? null,
+        maskedDestinationAccountNumber: pendingRecipient?.masked_account_number ?? null,
+      })
       setPendingValues(null)
-      form.reset({ account_id: '', amount: '', destination_account_id: '' })
+      setPendingRecipient(null)
+      form.reset({ account_id: '', amount: '' })
+      setRecipientAccountNumber('')
+      setVerifiedRecipient(null)
+      try {
+        await invalidate()
+      } catch (error) {
+        setBalanceRefreshError(error instanceof Error ? error.message : 'Account balances could not be refreshed.')
+      }
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : 'The transaction could not be completed.')
     } finally {
+      postingRef.current = false
       setIsPosting(false)
     }
   }
@@ -174,6 +235,12 @@ export function MoneyActionPage({ action }: { action: Action }) {
   const pendingAccount = pendingValues
     ? accountQuery.data?.find((account) => account.id === pendingValues.account_id)
     : undefined
+  const receiptAccounts = result
+    ? accountQuery.data?.filter((account) =>
+        account.id === result.transaction.source_account_id
+        || account.id === result.transaction.destination_account_id,
+      ) ?? []
+    : []
 
   return (
     <>
@@ -183,10 +250,35 @@ export function MoneyActionPage({ action }: { action: Action }) {
         <Card className="form-card">
           <form className="transaction-form" onSubmit={form.handleSubmit(submit)} noValidate>
             {requestError && !pendingValues && <Alert>{requestError}</Alert>}
-            {result && (
+            {result && action !== 'TRANSFER' && (
               <Alert tone="success">
-                {transactionLabel(result.type)} posted. Reference <strong className="mono">{result.id}</strong>
+                {transactionLabel(result.transaction.transaction_type)} posted. Reference <strong className="mono">{result.transaction.id}</strong>
               </Alert>
+            )}
+            {result && action === 'TRANSFER' && (
+              <section className="card transaction-receipt" aria-label="Transfer receipt">
+                <Alert tone="success">Transfer completed successfully.</Alert>
+                <dl className="transaction-detail-grid">
+                  <div><dt>Reference</dt><dd className="mono">{result.transaction.id}</dd></div>
+                  <div><dt>Transaction type</dt><dd>{transactionLabel(result.transaction.transaction_type)}</dd></div>
+                  <div><dt>Status</dt><dd><StatusPill status={result.transaction.status} /></dd></div>
+                  <div><dt>Amount</dt><dd>{formatPaise(result.transaction.amount_paise)} {result.transaction.currency}</dd></div>
+                  <div><dt>From account</dt><dd>{result.sourceAccountNumber ?? 'Your source account'}</dd></div>
+                  <div><dt>Recipient</dt><dd>{result.maskedDestinationAccountNumber ?? 'Verified recipient'}</dd></div>
+                  {receiptAccounts.map((account) => (
+                    <div key={account.id}>
+                      <dt>Updated balance · {account.account_number}</dt>
+                      <dd>{formatPaise(account.balance_paise)}</dd>
+                    </div>
+                  ))}
+                  <p className="page-footnote">Only updated balances for accounts available to your profile are shown.</p>
+                </dl>
+                {(accountQuery.isError || balanceRefreshError) && (
+                  <Alert tone="info">
+                    The transfer succeeded, but refreshed account balances are unavailable. Reload your accounts to see the latest balances.
+                  </Alert>
+                )}
+              </section>
             )}
             {action === 'TRANSFER' ? (
               <>
@@ -199,11 +291,31 @@ export function MoneyActionPage({ action }: { action: Action }) {
                   <FieldError>{form.formState.errors.account_id?.message}</FieldError>
                 </label>
                 <label className="form-field">
-                  <span>Recipient account ID</span>
-                  <input placeholder="Paste the recipient's account UUID" {...form.register('destination_account_id')} />
-                  <small>Use the account ID provided by the recipient. The API does not provide account-number lookup.</small>
-                  <FieldError>{form.formState.errors.destination_account_id?.message}</FieldError>
+                  <span>Recipient account number</span>
+                  <input
+                    value={recipientAccountNumber}
+                    maxLength={12}
+                    autoComplete="off"
+                    placeholder="LL0000000000"
+                    onChange={(event) => {
+                      lookupGeneration.current += 1
+                      setRecipientAccountNumber(event.target.value.toUpperCase())
+                      setVerifiedRecipient(null)
+                      setRecipientError('')
+                      setPendingValues(null)
+                      setPendingRecipient(null)
+                    }}
+                  />
                 </label>
+                <Button type="button" variant="secondary" onClick={verifyRecipient} disabled={lookupRecipient.isPending}>
+                  {lookupRecipient.isPending ? 'Verifying recipient…' : 'Verify recipient'}
+                </Button>
+                {verifiedRecipient && (
+                  <Alert tone="success">
+                    Recipient verified · {verifiedRecipient.masked_account_number} · {verifiedRecipient.status}
+                  </Alert>
+                )}
+                {recipientError && <Alert>{recipientError}</Alert>}
               </>
             ) : (
               <label className="form-field">
@@ -231,7 +343,16 @@ export function MoneyActionPage({ action }: { action: Action }) {
                 <strong>Current API balance: {formatPaise(accountQuery.data?.find((account) => account.id === selectedAccountId)?.balance_paise ?? 0)}</strong>
               )}
             </div>
-            <Button className="form-submit" type="submit" disabled={form.formState.isSubmitting || isPosting || accountQuery.isLoading || accounts.length === 0}>
+            <Button className="form-submit" type="submit" disabled={
+              form.formState.isSubmitting
+              || isPosting
+              || accountQuery.isLoading
+              || accounts.length === 0
+              || (action === 'TRANSFER' && (
+                !verifiedRecipient
+                || verifiedRecipient.accountNumber !== recipientAccountNumber.trim()
+              ))
+            }>
               Review internal transaction
             </Button>
             {accounts.length === 0 && !accountQuery.isLoading && (
@@ -265,7 +386,8 @@ export function MoneyActionPage({ action }: { action: Action }) {
               <span>Account</span><strong>{pendingAccount?.account_number ?? pendingValues.account_id}</strong>
               {action === 'TRANSFER' && (
                 <>
-                  <span>Recipient account ID</span><strong className="mono">{pendingValues.destination_account_id}</strong>
+                  <span>Recipient account</span><strong>{pendingRecipient?.masked_account_number}</strong>
+                  <span>Recipient status</span><strong>{pendingRecipient?.status}</strong>
                 </>
               )}
               <span>Internal ledger amount</span><strong>{formatPaise(pendingValues.amount)}</strong>

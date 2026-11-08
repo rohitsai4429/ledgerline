@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.account import AccountStatus
 
@@ -21,6 +21,18 @@ class AccountResponse(BaseModel):
     ledger_account_id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class RecipientLookupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_number: str = Field(pattern=r"^LL\d{10}$")
+
+
+class RecipientLookupResponse(BaseModel):
+    destination_account_id: UUID
+    masked_account_number: str
+    status: AccountStatus
 
 
 class AccountStatusUpdate(BaseModel):

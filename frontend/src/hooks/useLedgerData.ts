@@ -62,6 +62,12 @@ export function useCreateAccount() {
   })
 }
 
+export function useLookupRecipient() {
+  return useMutation({
+    mutationFn: accountsApi.lookupRecipient,
+  })
+}
+
 export function useUpdateAccountStatus() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -77,9 +83,11 @@ export function useUpdateAccountStatus() {
 export function useInvalidateLedger() {
   const queryClient = useQueryClient()
   return () => {
-    void queryClient.invalidateQueries({ queryKey: ['accounts'] })
-    void queryClient.invalidateQueries({ queryKey: ['transactions'] })
-    void queryClient.invalidateQueries({ queryKey: ['statement'] })
-    void queryClient.invalidateQueries({ queryKey: ['audit'] })
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+      queryClient.invalidateQueries({ queryKey: ['transactions'], refetchType: 'all' }),
+      queryClient.invalidateQueries({ queryKey: ['statement'] }),
+      queryClient.invalidateQueries({ queryKey: ['audit'] }),
+    ])
   }
 }

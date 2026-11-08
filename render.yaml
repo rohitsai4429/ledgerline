@@ -1,3 +1,4 @@
+
 services:
   - type: web
     name: ledgerline-api
@@ -31,7 +32,7 @@ services:
     runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
-    staticPublishPath: dist
+    staticPublishPath: ./frontend/dist
     envVars:
       - key: NODE_VERSION
         value: 24.22.1

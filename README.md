@@ -46,7 +46,7 @@ provisioning is performed outside the public registration and frontend flows.
 - Validation and configuration: Pydantic
 - Testing: Pytest
 - Frontend: React, TypeScript, Vite, Tailwind CSS, TanStack Query, React Router,
-  React Hook Form, Zod, Lucide, Recharts, Vitest, and Testing Library
+  React Hook Form, Zod, Lucide, Recharts, Vitest, Testing Library, and Playwright
 
 ## Project Status
 
@@ -248,14 +248,13 @@ write-once audit system is claimed.
 - Additive Alembic migrations for users, customer/system ledger accounts,
   journals, entries, idempotency records, and audit events.
 
-The current backend test suite has **44 passing tests**: 10 PostgreSQL account
-tests, 22 PostgreSQL transaction/privilege tests, 9 authentication tests using
-in-memory SQLite, and 3 health/CORS tests. PostgreSQL integration tests use the
-actual restricted `ledgerline_app` credentials against generated temporary
-schemas that are dropped after testing. A separate public-schema smoke test
-successfully registered and authenticated a user, created an account, and
-posted a deposit within an outer transaction that was rolled back. No smoke
-data remained. Pytest emits one Starlette `TestClient` deprecation warning.
+The backend suite currently collects **61 tests**, including PostgreSQL
+account and transaction/privilege tests, authentication tests, and health/CORS
+tests. In the current local verification, all 28 non-PostgreSQL tests passed.
+The 33 PostgreSQL tests use the restricted `ledgerline_app` credentials
+against temporary schemas; they require PostgreSQL and could not run because
+Docker Desktop was unavailable. Pytest emits one Starlette `TestClient`
+deprecation warning.
 
 ### Frontend product scope and limitations
 
@@ -311,6 +310,293 @@ copy `frontend/.env.example` to `frontend/.env`, and run `npm run dev` from
 `frontend`. To validate changes, run `npm run lint`, `npm run typecheck`,
 `npm test`, and `npm run build` in that directory. Verification results for the
 current frontend implementation are recorded in [PROMPTS.md](PROMPTS.md).
+
+### Browser end-to-end integration tests
+
+The Playwright suite exercises the real React app, FastAPI routes, and
+PostgreSQL runtime role without mocked API responses. It uses a fresh
+`ledgerline_e2e_<random hex>` schema in the database configured by
+`DATABASE_URL` and `MIGRATION_DATABASE_URL`, applies the additive migrations
+to that schema, and drops only that exact generated schema after the run. It
+does not touch the existing `public` schema, records, or Docker volume.
+
+Prerequisites: PostgreSQL 17 running through the existing Compose service,
+`backend/.env` configured with the migration `ledgerline_user` and runtime
+`ledgerline_app` URLs pointing at the same database, installed frontend npm
+dependencies, and the backend virtual environment. Start the existing database
+service (from `backend`) without removing or resetting its volume, then install
+the browser and run the test (from `frontend`):
+
+```powershell
+cd backend
+docker compose up -d db
+cd ..\frontend
+npx playwright install chromium
+npm run test:e2e
+```
+
+Ports `127.0.0.1:18000` (isolated-schema API) and `127.0.0.1:15173` (Vite)
+must be free. Test-only role credentials are randomly generated at runtime,
+kept in an ignored temporary state file, and removed after teardown. The setup
+refuses to overwrite a leftover state file. If setup or a test is interrupted,
+inspect
+`frontend/.playwright-state.json` and remove only its named
+`ledgerline_e2e_<random hex>` schema using the configured migration role. The
+scoped helper validates the schema prefix:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe scripts\e2e_db.py cleanup ledgerline_e2e_0123456789ab 0123456789ab
+```
+
+Cleanup also verifies the schema's E2E-run marker before dropping it. Never
+use a wildcard or drop any other schema. If the schema is absent or has no
+matching marker, cleanup refuses to drop anything; remove the stale state file
+only after confirming that its schema was never created or is already absent.
+
+**Previously recorded result:** `npm run test:e2e` — **1 browser journey passed**
+on Chromium. It registered two account holders, logged in as each, created
+separate owned accounts, posted an internal deposit, withdrawal and transfer,
+replayed a request with the same idempotency key, rejected insufficient
+funds and foreign-account access, displayed history and a statement, refreshed
+and reauthenticated, changed an account status and reversed a transfer as
+ADMIN, and verified read-only AUDITOR access including denied financial and
+status mutations. PostgreSQL verification found exactly four posted journals
+(deposit, withdrawal, transfer, reversal), eight balanced ledger entries,
+final reconciled balances of `9,000` paise for Customer A and `0` paise for
+Customer B, the expected frozen status, and audit/idempotency records. The
+Playwright HTML report with attached role screenshots is generated at
+`frontend/playwright-report/index.html`; test results are in
+`frontend/test-results/`. These generated files are ignored by Git.
+
+## Zero-Cost Render + Neon Deployment Runbook
+
+This is a hobby/demo deployment target, not a production availability
+commitment. Render Free web services sleep after 15 idle minutes, have
+ephemeral filesystems, share a 750-hour monthly free-instance allowance per
+workspace, cannot receive private-network traffic, and do not provide Shell or
+one-off jobs. Neon Free currently has usage/storage/egress quotas and scales
+compute to zero (currently 100 CU-hours and 1 GB storage per project, with
+5 GB monthly public egress). Neon describes Free as permanent and requiring no
+credit card. Keep both providers on their Free plans, confirm account limits
+before setup, and monitor usage; do not enable paid upgrades or rely on paid
+credits. Exceeding quotas can suspend or limit service. Render Free can also
+suspend services that generate unusual outbound traffic to external databases.
+
+The repo's [`render.yaml`](./render.yaml) defines only the API and static
+frontend. It does not create Neon resources or store any secret.
+
+### Exact Render dashboard configuration
+
+Create a **Static Site** and a **Web Service** from the private repository.
+Keep the repository private. The Blueprint pins the Web Service to `plan: free`;
+if configuring it manually, explicitly choose **Free** (Render otherwise
+defaults a new Web Service to paid `0.5c-512mb`). Static Site hosting is free;
+do not add a paid plan or custom-domain purchase.
+
+| Setting | Frontend | Backend |
+| --- | --- | --- |
+| Root directory | `frontend` | `backend` |
+| Runtime | Static Site | Python |
+| Build command | `npm ci && npm run build` | `python -m pip install -r requirements.txt` |
+| Publish directory | `dist` | — |
+| Start command | — | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| Health-check path | — | `/health` |
+| Python version | — | `3.11.9` |
+| Node version | `24.22.1` | — |
+| SPA rewrite | `/*` → `/index.html` | — |
+| Plan | Free | Free |
+
+These settings are also in the Blueprint. On Render Free the API cannot
+receive private-network traffic and Neon is not on Render's private network;
+the API must connect to Neon's public endpoint over TLS. Do not configure
+Render's private database URL or claim this path is private networking.
+With the Blueprint service names, expected URLs are
+`https://ledgerline-api.onrender.com` and
+`https://ledgerline-frontend.onrender.com` when those names are available.
+The Blueprint sets `VITE_API_BASE_URL` and `CORS_ALLOWED_ORIGINS` to those
+exact origins. If Render assigns either service a different host, update the
+frontend build variable and API CORS value to the exact Dashboard URLs before
+deploying. `DATABASE_URL` and `JWT_SECRET_KEY` use `sync: false` and must be
+entered manually as secret environment values; no secret is in the manifest.
+
+### Neon project and restricted runtime role
+
+1. In Neon, create one PostgreSQL 17 project on the **Free** plan, with a
+   database named `ledgerline`. Do not create extra projects or branches.
+   Record the initial owner role name shown by Neon; Neon normally generates
+   it from the database name (for example `ledgerline_owner`).
+2. Obtain separate Neon connection strings for the database owner and runtime
+   role. Use the **direct** endpoint for provisioning and Alembic, and the
+   **pooled** (`-pooler`) endpoint for the FastAPI runtime. Change only the
+   driver prefix to `postgresql+psycopg://`; retain Neon's host, credentials,
+   database, `sslmode=require`, and `channel_binding=require` query options.
+   Psycopg 3 (`psycopg[binary]` in requirements) accepts PostgreSQL TLS
+   connection parameters; Neon requires TLS. The application uses
+   SQLAlchemy's normal connection pool and `pool_pre_ping`; its advisory lock
+   is transaction-scoped and it does not depend on session-local state, so
+   Neon transaction pooling is suitable for the runtime URL. The Alembic
+   environment rejects Neon `-pooler` endpoints.
+3. From a trusted local machine, install backend requirements, then provision
+   the runtime role. The helper prompts without echoing the migration URL and
+   asks for the new runtime password twice. The URL is not stored in the
+   repository or Render:
+
+   ```powershell
+   cd backend
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
+   python scripts\provision_runtime_role.py
+   ```
+
+   The helper requires database name `ledgerline`, a TLS-enabled direct
+   `postgresql+psycopg` URL, a migration role that owns the `public` schema
+   (including PostgreSQL's `pg_database_owner` ownership), and effective
+   role-management capability. It creates/updates only
+   `ledgerline_app` with `LOGIN` and `NOINHERIT`, and enforces `NOSUPERUSER`,
+   `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`,
+   strips role memberships, denies schema/database creation, and preserves
+   the project's column-level privilege model. Do not create the runtime role
+   using Neon Console/CLI role creation if that method grants it membership in
+   Neon's administrative role; use the SQL-based provisioner instead.
+   Rerunning with the same password is idempotent; entering a different one
+   rotates the runtime credential, so update Render's `DATABASE_URL` to match.
+
+4. Configure Render API `DATABASE_URL` with Neon's pooled endpoint, database
+   `ledgerline`, role `ledgerline_app`, its separately prompted password, and
+   the same TLS query options. URL-encode reserved characters in credentials.
+   Never put the Neon owner/migration URL on either Render service.
+
+### Migration owner and exact manual migration procedure
+
+Migrations `0001` through `0004` do not name a PostgreSQL owner role.
+`20261107_0005` previously hardcoded `ledgerline_user` in its
+`ALTER DEFAULT PRIVILEGES` statements. It now checks the actual owner of every
+LedgerLine table, requires the migration role to match that owner, safely
+quotes it, and scopes runtime-role default privileges to the application
+schema. It verifies the `SECURITY DEFINER` functions are owned by the table
+owner; their `EXECUTE` privilege is revoked from `PUBLIC` and granted only to
+`ledgerline_app`. The migration also refuses if `ledgerline_app` still has
+effective schema `CREATE` privileges rather than revoking broader grants.
+The migration role must own `public`, create/manage `ledgerline_app`, and
+execute the reviewed SQL. `0005` intentionally fails rather than broadening
+runtime permissions. `ledgerline_user` remains only in the local Docker
+bootstrap configuration, not as a migration prerequisite.
+
+Render Free does not provide Shell or one-off jobs. Run migrations from the
+trusted local machine using the Neon owner URL, not from API startup. The
+provisioner above uses a hidden prompt for role credentials. For Alembic, use
+PowerShell to enter the privileged URL without echo; it is passed only to the
+local Alembic process and removed immediately:
+
+```powershell
+$secureUrl = Read-Host "Neon migration DATABASE_URL" -AsSecureString
+$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureUrl)
+try {
+    $env:MIGRATION_DATABASE_URL = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    python -m alembic upgrade head
+    if ($LASTEXITCODE -ne 0) { throw "Alembic migration failed" }
+    python -m alembic current
+}
+finally {
+    Remove-Item Env:\MIGRATION_DATABASE_URL -ErrorAction SilentlyContinue
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+}
+```
+
+Paste only the TLS-enabled **direct** `postgresql+psycopg://` URL at the
+secure prompt.
+Review the resulting revision before deploying the API. Never put the
+privileged URL in Render environment variables, command-line arguments, logs,
+or committed files. Do not run Alembic in the web-service start command.
+
+### One-time ADMIN/AUDITOR bootstrap
+
+Public registration accepts only email and password; its schema rejects extra
+fields, and the database default assigns `ACCOUNT_HOLDER`. Do not promote
+accounts by editing the role directly. After `alembic upgrade head`, create
+each operator from a trusted local machine using the same direct privileged
+connection. From `backend`, run:
+
+```powershell
+python scripts\bootstrap_operator.py
+```
+
+The script prompts without echo for the direct TLS migration URL and operator
+password (twice), and visibly prompts for exactly `ADMIN` or `AUDITOR` and the
+email. It uses the application's Argon2 hasher, rejects duplicate normalized
+email addresses, writes the user and a `PRIVILEGED_USER_BOOTSTRAPPED` audit
+event in one transaction, and prints no password or connection string. Run
+once per named operator; there are no default credentials. The migration
+credential is used only by this local process and must never be configured on
+Render.
+
+### Environment-variable checklist
+
+| Service/process | Variable | Value |
+| --- | --- | --- |
+| Render API | `DATABASE_URL` | Neon pooled (`-pooler`) `postgresql+psycopg://` URL using `ledgerline_app`, database `ledgerline`, TLS required |
+| Render API | `JWT_SECRET_KEY` | Unique generated secret, at least 32 characters |
+| Render API | `CORS_ALLOWED_ORIGINS` | `https://ledgerline-frontend.onrender.com` if assigned; otherwise the exact Dashboard static-site origin, no slash/path |
+| Render API | `APP_ENV` | `production` |
+| Render API | `LOG_LEVEL` | `INFO` |
+| Render API | `APP_NAME` | Optional; defaults to `LedgerLine API` |
+| Render API | `JWT_ALGORITHM` | Optional; defaults to `HS256` |
+| Render API | `JWT_ACCESS_TOKEN_MINUTES` | Optional; defaults to `30` |
+| Render Static Site build | `VITE_API_BASE_URL` | `https://ledgerline-api.onrender.com` if assigned; otherwise the exact Dashboard API URL, no trailing slash |
+| Local migration/provision/bootstrap process only | `MIGRATION_DATABASE_URL` | Neon direct migration-owner URL; never configured on Render |
+
+`backend/app/core/config.py` loads runtime settings from the API process
+environment (or the ignored local `.env`). Alembic independently reads
+`MIGRATION_DATABASE_URL` in `backend/alembic/env.py`. Frontend
+`VITE_API_BASE_URL` is a public build-time setting, not a secret. Set
+`CORS_ALLOWED_ORIGINS` to the exact HTTPS origin Render assigns to the static
+site. For browser previews or custom domains, add only each exact origin.
+`POSTGRES_PASSWORD` and `APP_DB_PASSWORD` in `backend/.env.example` are for the
+local Docker Compose bootstrap only; do not configure them on Render or use
+them for Neon. `backend/docker/init-app-role.sql` is likewise a local Compose
+bootstrap script, not a Neon provisioning script.
+
+### Compatibility and deployment verification
+
+Confirmed from the repository: `/health` returns `{"status":"ok"}` and is
+suitable as Render's liveness health-check path, but it does not check the
+database. Financial tables, constraints, deferred triggers, and PL/pgSQL
+functions use PostgreSQL features supported by Neon. Both connections require
+TLS; Alembic and provisioning use Neon's direct endpoint, while the API uses
+the pooled endpoint. Neon compatibility with actual role permissions still
+needs an isolated preflight migration before relying on the deployment.
+
+After configuration and migrations, verify with synthetic demonstration data:
+
+1. Health: `curl -fsS https://<api-name>.onrender.com/health` returns
+   `{"status":"ok"}`.
+2. Database: use a local, hidden-prompt smoke-check script or the API logs to
+   confirm API connections authenticate as `ledgerline_app` to `ledgerline`;
+   never print the URL. Confirm registration succeeds, which exercises the
+   restricted runtime role.
+3. HTTPS/CORS: use the frontend's `https://<site-name>.onrender.com` origin;
+   verify its browser requests reach the HTTPS API. Check a preflight:
+
+   ```sh
+   curl -i -X OPTIONS 'https://<api-name>.onrender.com/api/v1/auth/login' \
+     -H 'Origin: https://<site-name>.onrender.com' \
+     -H 'Access-Control-Request-Method: POST' \
+     -H 'Access-Control-Request-Headers: content-type'
+   ```
+
+   Confirm `Access-Control-Allow-Origin` exactly matches the frontend origin;
+   do not use `*`.
+4. Register and log in with synthetic customers, create accounts, and test
+   internal deposit, transfer, history, and statements.
+5. Public registration only creates `ACCOUNT_HOLDER`. Admin/auditor verification
+   requires separately approved synthetic operator-created users. Verify
+   admin account/status/reversal/audit functions and auditor read-only access;
+   confirm auditor mutations are denied. Never elevate a public registration
+   or use real financial/customer records.
+
+No Neon project or Render service has been created, migrated, or deployed.
 
 ## Security and Integrity
 
@@ -399,7 +685,7 @@ Verification performed after migration:
 - `.\.venv\Scripts\alembic.exe current` and `heads` — `20261107_0005` is the
   current revision and sole head.
 - `.\.venv\Scripts\alembic.exe check` — no new upgrade operations detected.
-- `.\.venv\Scripts\python.exe -m pytest -q` — **44 passed** (one existing
+- `.\.venv\Scripts\python.exe -m pytest -q` — **56 passed** (one existing
   Starlette `TestClient` deprecation warning).
 - Direct SQL permission probes against the existing public schema — all 16
   prohibited operations returned SQLSTATE `42501`; inconsistent balance

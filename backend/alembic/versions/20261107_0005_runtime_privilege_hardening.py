@@ -26,6 +26,42 @@ def _schema_name() -> str:
 def upgrade() -> None:
     bind = op.get_bind()
     schema = _schema_name()
+    migration_role_name = bind.scalar(sa.text("SELECT current_user"))
+    if migration_role_name is None:
+        raise RuntimeError("The migration connection has no active role")
+    owner_rows = bind.execute(
+        sa.text(
+            """
+            SELECT c.relname, pg_get_userbyid(c.relowner) AS owner_name
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND c.relname IN (
+                  'users', 'ledger_accounts', 'accounts', 'journal_transactions',
+                  'ledger_entries', 'idempotency_records', 'audit_events'
+              )
+              AND c.relkind IN ('r', 'p')
+            """
+        )
+    ).all()
+    expected_tables = {
+        "users",
+        "ledger_accounts",
+        "accounts",
+        "journal_transactions",
+        "ledger_entries",
+        "idempotency_records",
+        "audit_events",
+    }
+    if (
+        {row.relname for row in owner_rows} != expected_tables
+        or {row.owner_name for row in owner_rows} != {migration_role_name}
+    ):
+        raise RuntimeError(
+            "Run migration 0005 as the owner of all LedgerLine tables; "
+            "refusing to alter privileges for a different object owner"
+        )
+    object_owner = bind.dialect.identifier_preparer.quote(owner_rows[0].owner_name)
 
     mismatched_ledgers = bind.scalar(
         sa.text(
@@ -215,21 +251,18 @@ def upgrade() -> None:
         )
     )
     for statement in (
-        "ALTER ROLE ledgerline_app WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
         f"REVOKE CREATE ON DATABASE {database} FROM ledgerline_app",
         f"REVOKE CREATE ON SCHEMA {schema} FROM ledgerline_app",
-        f"REVOKE CREATE ON SCHEMA {schema} FROM PUBLIC",
         f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {schema} FROM ledgerline_app",
         f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA {schema} FROM ledgerline_app",
-        f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {schema} FROM PUBLIC",
         f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {schema} FROM ledgerline_app",
-        "ALTER DEFAULT PRIVILEGES FOR ROLE ledgerline_user "
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {object_owner} IN SCHEMA {schema} "
         "REVOKE ALL ON TABLES FROM ledgerline_app",
-        "ALTER DEFAULT PRIVILEGES FOR ROLE ledgerline_user "
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {object_owner} IN SCHEMA {schema} "
         "REVOKE ALL ON SEQUENCES FROM ledgerline_app",
-        "ALTER DEFAULT PRIVILEGES FOR ROLE ledgerline_user "
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {object_owner} IN SCHEMA {schema} "
         "REVOKE ALL ON FUNCTIONS FROM ledgerline_app",
-        "ALTER DEFAULT PRIVILEGES FOR ROLE ledgerline_user "
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {object_owner} "
         "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC",
         f"GRANT USAGE ON SCHEMA {schema} TO ledgerline_app",
     ):
@@ -304,6 +337,43 @@ def upgrade() -> None:
         f"{schema}.ledgerline_lock_journal_for_reversal(uuid) TO ledgerline_app",
     ):
         op.execute(sa.text(statement))
+
+    has_public_create = bind.scalar(
+        sa.text(
+            "SELECT has_schema_privilege('ledgerline_app', current_schema(), 'CREATE')"
+        )
+    )
+    if has_public_create:
+        raise RuntimeError(
+            "ledgerline_app still has effective CREATE privilege on the application "
+            "schema; remove its source grant explicitly before continuing"
+        )
+
+    security_definer_owners = bind.execute(
+        sa.text(
+            """
+            SELECT p.proname, pg_get_userbyid(p.proowner) AS owner_name,
+                   p.prosecdef
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = current_schema()
+              AND p.proname IN (
+                  'ledgerline_mark_journal_posted',
+                  'ledgerline_lock_journal_for_reversal'
+              )
+            """
+        )
+    ).all()
+    if (
+        len(security_definer_owners) != 2
+        or any(
+            row.owner_name != owner_rows[0].owner_name or not row.prosecdef
+            for row in security_definer_owners
+        )
+    ):
+        raise RuntimeError(
+            "Security-definer functions must be owned by the LedgerLine object owner"
+        )
 
 
 def downgrade() -> None:

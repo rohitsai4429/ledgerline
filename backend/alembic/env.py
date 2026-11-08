@@ -2,7 +2,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 
 from app import models
 from app.core.config import get_migration_database_url
@@ -15,6 +15,10 @@ if config.config_file_name is not None:
 migration_database_url = get_migration_database_url()
 if migration_database_url is None:
     raise RuntimeError("MIGRATION_DATABASE_URL must be set to run Alembic migrations")
+if "-pooler." in (make_url(migration_database_url).host or "").lower():
+    raise RuntimeError(
+        "Alembic requires a direct PostgreSQL connection, not a pooled endpoint"
+    )
 
 config.set_main_option(
     "sqlalchemy.url",

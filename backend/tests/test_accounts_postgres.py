@@ -47,10 +47,10 @@ def account_database() -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     )
     try:
         with migration_schema_engine.connect() as connection:
-            if connection.scalar(text("SELECT current_user")) != "ledgerline_user":
+            if connection.scalar(text("SELECT current_user")) == "ledgerline_app":
                 raise RuntimeError(
-                    "MIGRATION_DATABASE_URL must connect as ledgerline_user "
-                    "to apply its default privileges"
+                    "MIGRATION_DATABASE_URL must use the privileged object-owner "
+                    "role, not ledgerline_app"
                 )
 
         with migration_schema_engine.connect() as connection:

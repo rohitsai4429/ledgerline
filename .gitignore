@@ -17,6 +17,10 @@ htmlcov/
 node_modules/
 dist/
 .vite/
+playwright-report/
+test-results/
+.playwright-state.json
 
 # Logs
 *.log
+.neon

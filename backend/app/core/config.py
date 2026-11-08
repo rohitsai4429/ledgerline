@@ -7,7 +7,10 @@ from dotenv import dotenv_values
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+BASE_DIR = Path(__file__).resolve().parents[2]
+ENV_FILE = BASE_DIR / ".env.runtime"
+if not ENV_FILE.exists():
+    ENV_FILE = BASE_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -35,7 +38,10 @@ class Settings(BaseSettings):
 
 
 def get_migration_database_url() -> str | None:
-    return os.environ.get("MIGRATION_DATABASE_URL") or dotenv_values(ENV_FILE).get(
+    env_file = BASE_DIR / ".env.runtime"
+    if not env_file.exists():
+        env_file = BASE_DIR / ".env"
+    return os.environ.get("MIGRATION_DATABASE_URL") or dotenv_values(env_file).get(
         "MIGRATION_DATABASE_URL",
     )
 

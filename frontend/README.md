@@ -65,9 +65,10 @@ and amounts are not rounded by JavaScript number parsing.
 | `POST /api/v1/auth/login` | `{email, password}` | OTP challenge; never a LedgerLine token | Public; `401` invalid credentials, `403` disabled user, `422` invalid input |
 | `POST /api/v1/auth/google` | `{credential, confirm_account_link?}` | OTP challenge or explicit account-link confirmation | Public; backend verifies the signed Google ID token; `401` invalid credential |
 | `POST /api/v1/auth/otp/verify` | `{challenge_id, code}` | `{access_token, token_type, expires_in}` | Public; token is issued only after a valid single-use code |
-| `POST /api/v1/auth/otp/resend` | `{challenge_id}` | Resend cooldown status | Public; subject to cooldown and hourly limits |
+| `POST /api/v1/auth/otp/resend` | `{challenge_id}` | Generic resend response | Public; subject to cooldown and hourly limits |
 | `GET /api/v1/auth/me` | None | Safe user profile | Bearer auth; `401` invalid/expired token or unavailable user |
 | `POST /api/v1/accounts` | Empty JSON object | Account including account number, status, integer-paise balance, ledger account ID, timestamps | Account holder; `201`; `403` wrong role, `422` writable fields rejected, `503` account number unavailable |
+| `POST /api/v1/accounts/recipient-lookup` | `{account_number}` | Available destination account UUID and masked account number | Account holder; `404` unavailable recipient, `422` invalid account number |
 | `GET /api/v1/accounts` | None | Array of accounts | Authenticated; holder sees own accounts, admin/auditor see all; `401` unauthenticated |
 | `GET /api/v1/accounts/{account_id}` | UUID path parameter | Account | Authenticated; holder ownership is enforced; `404` unavailable/not owned, `422` invalid UUID |
 | `PATCH /api/v1/accounts/{account_id}/status` | `{status: "ACTIVE" \| "FROZEN" \| "CLOSED"}` | Updated account | Admin only; `403`, `404`, `409` closed-account transition, `422` invalid input |
@@ -100,9 +101,11 @@ backend remains the authorization boundary. Registration never accepts a role.
 There is no raw journal-line endpoint. The app uses the account statement's
 actual entries for ledger details, the transaction-history endpoint for
 transaction records, and the audit-events endpoint for audit data.
-Transfers accept a recipient account UUID because the API does not provide an
-account-number lookup. Transaction search and type filtering are limited to
-the currently loaded API page; account filtering and pagination use the API.
+Transfers accept the destination UUID returned by
+`POST /api/v1/accounts/recipient-lookup`; the frontend displays only the
+masked account number before confirmation. Transaction search and type
+filtering are limited to the currently loaded API page; account filtering and
+pagination use the API.
 Admin account searching filters the account list returned by the existing
 accounts endpoint.
 

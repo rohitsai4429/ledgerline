@@ -110,16 +110,15 @@ rejected.
 
 ### Deployment scope
 
-The implemented local setup is PostgreSQL through Docker Compose, with the
-FastAPI process and Vite development server run separately. The frontend has
-a production build and an SPA fallback rule in `frontend/public/_redirects`;
-the README describes deploying the static bundle separately and configuring
-the API URL and CORS origin.
-
-Those are build and deployment instructions, not evidence that a production
-hosting environment, production application containers, or automated
-deployment pipeline has been provisioned. The repository does not currently
-define a Compose deployment for the API/frontend.
+At the time this ADR was written (2026-11-07), the verified deployment in
+repository evidence was the local PostgreSQL/Compose setup with FastAPI and
+Vite run separately. The owner now confirms the frontend and backend are
+deployed on Render Free and the production database is Neon PostgreSQL; see
+the [current project documentation](../PROJECT_DOCUMENTATION.md#26-deployment-architecture).
+Exact Render Dashboard values, source branch, auto-deployment trigger, and
+production database settings remain external and were not independently
+verified during the current documentation audit. The repository still does
+not define a Compose deployment for the API/frontend.
 
 ## 10. Validation and implementation evidence
 
@@ -128,18 +127,22 @@ define a Compose deployment for the API/frontend.
   assembles one FastAPI application.
 - `backend/requirements.txt` and `frontend/package.json` declare the runtime,
   persistence, UI, and test dependencies listed above.
-- `backend/alembic/versions/` contains the additive schema history through
-  `20261107_0005_runtime_privilege_hardening`. The transaction model and
-  migrations define PostgreSQL checks, foreign keys, uniqueness rules, and
-  trigger-based integrity protections.
+- At the time this ADR was written, `backend/alembic/versions/` contained
+  migration history through `20261107_0005_runtime_privilege_hardening`.
+  Migrations `20261108_0006` and `20261108_0007` were added later; the current
+  repository head is `20261108_0007`. The transaction model and migrations
+  define PostgreSQL checks, foreign keys, uniqueness rules, and trigger-based
+  integrity protections.
 - `backend/compose.yaml` currently defines PostgreSQL only. The API is run
   separately with Uvicorn during local development; the frontend is run with
   Vite. The Compose file binds the database to `127.0.0.1:5433` and persists
   its data in the `ledgerline_data` volume.
-- The repository's latest recorded verification includes 56 passing backend
+- Verification recorded at the time of this ADR included 56 passing backend
   tests, 16 passing frontend unit tests, passing frontend lint and typecheck,
   a successful production build, and one passing Playwright browser journey
-  against the real frontend, API, and an isolated PostgreSQL schema.
+  against the real frontend, API, and an isolated PostgreSQL schema. These
+  are historical, not the latest overall results. Current time-scoped test
+  evidence is in the [project documentation](../PROJECT_DOCUMENTATION.md#28-testing-strategy-and-test-results).
 - The E2E database verifier checks balanced journal entries and reconciled
   account balances. These test results are evidence of implemented behavior,
   not performance benchmarks, a security certification, or proof of

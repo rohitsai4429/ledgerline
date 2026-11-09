@@ -1,6 +1,6 @@
 # LedgerLine Threat Model and Security Review
 
-**Review date:** 2026-11-07  
+**Review date:** 2026-11-09 (documentation update; not a new penetration test)
 **System boundary:** Internal demonstration ledger API and browser client. No bank, UPI, card, NEFT, RTGS, or payment-provider settlement is in scope.
 
 ## 1. System assets and trust boundaries
@@ -63,8 +63,12 @@ workflow.
 | T-17 | Database network and roles | Exposed superuser database | A reachable host interface exposes PostgreSQL; compromised/guessed bootstrap credentials permit trigger or role changes. | Full database compromise and integrity-control bypass. | Medium | Compose binds port 5433 to loopback; app uses a separate non-superuser role; bootstrap role is reserved for migrations. | `docker compose config --quiet`; live `rolsuper` and privilege verification | Implemented and verified on the local Compose database; external firewall/network policy remains unassessed. |
 | T-18 | Account availability | Frozen/closed state bypass | User attempts an operation on a frozen/closed account or admin reactivates a closed account. | Unauthorized account activity. | High | Service validates active state; closed accounts cannot be reactivated. | Account/transaction status tests in `backend/tests/` | Implemented and tested in final PostgreSQL backend run. |
 | T-19 | Ledger meaning | Unbacked internal deposits | Account holder posts an internal deposit without external funding evidence. | Internal balance may be mistaken for real or redeemable funds. | Medium | Product disclosure states transactions are internal and do not move real money; INR clearing entries preserve internal double-entry balance. | Product-copy/frontend tests | Residual product boundary: no funding authorization or settlement exists; misrepresenting these balances as real funds would create severe risk. |
-| T-20 | Browser and deployment configuration | Unsafe frontend data/configuration | Attacker or operator exposes a secret through `VITE_*`, browser storage, or permissive hosting configuration. | Secret disclosure or client compromise. | Medium | No frontend secrets; `.env` is ignored; frontend docs describe bearer limitations and deployment CORS. | Frontend tests/build and `npm audit` | Frontend tests/typecheck/lint passed in review; deployment-specific hosting configuration was not assessed. |
+| T-20 | Browser and deployment configuration | Unsafe frontend data/configuration | Attacker or operator exposes a secret through `VITE_*`, browser storage, or permissive hosting configuration. | Secret disclosure or client compromise. | Medium | No frontend secrets; `.env` is ignored; frontend docs describe bearer limitations and deployment CORS. | Frontend tests/build and `npm audit` | Frontend tests/typecheck/lint passed in the historical review; owner confirms Render deployment, but exact Dashboard values, hosting headers, and TLS configuration were not independently checked. |
 | T-21 | Access-token lifetime | JWT without expiration | A token signed without `exp` is accepted and remains valid indefinitely, including after intended access-token lifetime. | Long-lived authenticated access if a trusted token issuer omits expiry. | Medium | Require `sub`, `iat`, and `exp` during JWT decode; retain fixed HS256 allowlist and current-user status check. | `backend/tests/test_auth.py::test_jwt_missing_required_time_claim_is_rejected` | Confirmed before fix (token without `exp` returned 200); fixed and regression-tested. |
+| T-22 | OTP challenge and recipient mailbox | OTP theft, brute force, or replay | Attacker obtains or guesses a code, or tries a consumed/expired challenge. | Account takeover. | High | Cryptographically generated eight-digit code; HMAC-SHA256 digest at rest; five-minute expiry; five-attempt maximum; one-time consumption; cooldown/hourly send limits; JWT only after verification. | Focused OTP/authentication/health suite (37 passed after mailer integration, as reported) | Controls are implemented; production threat exposure includes the recipient mailbox and the trusted backend. |
+| T-23 | OTP email transport | Shared-secret disclosure or unauthorized mailer invocation | Attacker obtains the backend/mail-script shared secret or sends requests to the Apps Script endpoint. | Unauthorized email sends; exposure of the delivered OTP may enable account takeover. | High | HTTPS JSON POST; backend-only `OTP_MAILER_SECRET`; matching Apps Script property; HTTPX timeout and redirect following; final status and `ok: true` response required; credentials and OTPs must not be logged. | Focused OTP/authentication/health suite (37 passed after integration, as reported) | Integration is active per project configuration; script source and external secret storage were not independently audited. Rotate both sides if compromise is suspected. |
+| T-24 | OTP email availability | Mail quota, script failure, or delivery delay | Apps Script/Gmail rejects or delays mail due to quota, provider policy, deployment, or transient failure. | Registration/login cannot complete; repeated attempts may be cooldown-limited. | Medium | Delivery failure is surfaced; challenge expiry and resend controls bound challenge lifetime and request frequency. | Mailer integration tests; live password and Google flows reported successful | Residual risk: Gmail quota and recipient delivery vary; registration to a different recipient after integration remains unverified. No fallback provider or delivery analytics is documented. |
+| T-25 | Google identity | Forged, expired, wrong-audience, or unverified-email ID token | Attacker submits a token not issued for this Google Web Client ID or attempts unsafe same-email account linking. | Account takeover or identity misbinding. | High | Backend verifies Google signature, audience, issuer, expiration, subject, and verified-email claim; account linking requires explicit confirmation and OTP. | Google authentication tests and live sign-in/account-link flow reported successful | Application controls are present; Google Cloud project, consent, authorized origins, and external console configuration were not independently inspected. |
 
 ## 5. Attack scenarios
 
@@ -212,7 +216,10 @@ restrictions, and an additive migration. Phase 2 also confirmed the missing
 JWT time-claim finding T-21: a correctly signed token without `exp` was
 accepted with HTTP 200 before the fix. JWT validation now requires `sub`,
 `iat`, and `exp`; the new API regression tests reject missing time claims.
-The current database revision is `20261107_0005 (head)`.
+At the time of this Phase 2 test run, the database revision was
+`20261107_0005 (head)`. The repository now has the single Alembic head
+`20261108_0007`; the production database's applied revision was not queried
+in this documentation audit.
 
 **Attack attempted and blocked (test evidence):**
 
@@ -261,3 +268,28 @@ the tested cases; one Medium JWT claim enforcement issue was reproduced,
 fixed, and regression-tested. These tests are scoped evidence, not a claim
 that LedgerLine has received a comprehensive penetration test. The residual
 database-owner trust boundary and deployment risks in Section 9 remain.
+
+## 11. Post-mailer integration and deployment status
+
+The current OTP delivery path is Google Apps Script Web App plus Gmail
+`MailApp`, replacing the historical Resend integration. The FastAPI backend
+posts the shared secret, recipient, and OTP over HTTPS, follows the Apps
+Script response redirect, enforces a timeout, and requires a successful
+status and final JSON `ok: true`. The OTP remains single-use and
+HMAC-digested in the database; the backend must send the plaintext code to the
+mailer for delivery. Neither the code nor shared secret should be logged.
+
+The project owner confirms the frontend and backend are deployed on Render
+Free and the production database is Neon PostgreSQL. The owner also reports
+successful live password login/OTP and Google sign-in/account linking. These
+are user-provided operational facts, not an independent production
+assessment. The current backend full-suite result is not available after the
+mailer change: 75 backend tests passed before it, and 37 focused
+OTP/authentication/health tests passed afterward. A fresh registration to a
+recipient different from the Apps Script owner's address remains unverified.
+
+The external Apps Script source, stored script property, current Gmail quotas,
+Google Cloud console state, Render Dashboard configuration, Neon branch and
+backup configuration, and live service commit were not inspected. This
+documentation update does not close those residual risks or constitute a new
+security test.

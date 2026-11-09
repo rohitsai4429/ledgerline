@@ -19,11 +19,11 @@ digraph LedgerLineArchitecture {
   }
 
   subgraph cluster_render {
-    label=<<B>RENDER HOSTING</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">Services deploy from GitHub main</FONT>>;
+    label=<<B>RENDER HOSTING</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">Owner-confirmed Render Free • deploy trigger not verified</FONT>>;
     color="#93C5FD"; fillcolor="#EFF6FF"; style="rounded,filled"; penwidth=1.5; margin=18;
-    static [label=<<B>Render Static Site</B><BR/><FONT POINT-SIZE="9">ledgerline-frontend</FONT><BR/><FONT POINT-SIZE="9">Serves compiled SPA assets</FONT>>, fillcolor="#DBEAFE", color="#3B82F6", penwidth=1.5];
+    static [label=<<B>Render Static Site</B><BR/><FONT POINT-SIZE="9">ledgerline-frontend-bmtt.onrender.com</FONT><BR/><FONT POINT-SIZE="9">Serves compiled SPA assets</FONT>>, fillcolor="#DBEAFE", color="#3B82F6", penwidth=1.5];
     subgraph cluster_api {
-      label=<<B>FastAPI Web Service</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">ledgerline-api • Python 3.11</FONT>>;
+      label=<<B>FastAPI Web Service</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">ledgerline-api-9dld.onrender.com • Python 3.11</FONT>>;
       color="#60A5FA"; fillcolor="#F8FBFF"; style="rounded,filled"; penwidth=1.2; margin=14;
       routes [label=<<B>REST API routers</B><BR/><FONT POINT-SIZE="9">Auth • Accounts • Transactions</FONT><BR/><FONT POINT-SIZE="9">Statements • Audit • Health</FONT>>, color="#60A5FA"];
       security [label=<<B>Validation &amp; security boundary</B><BR/><FONT POINT-SIZE="9">Pydantic • JWT • role / ownership checks</FONT><BR/><FONT POINT-SIZE="9">Google ID-token verification</FONT>>, fillcolor="#E0F2FE", color="#0284C7"];
@@ -44,7 +44,7 @@ digraph LedgerLineArchitecture {
   subgraph cluster_mail {
     label=<<B>OTP EMAIL DELIVERY</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">Shared-secret-protected HTTPS integration</FONT>>;
     color="#F9A8D4"; fillcolor="#FDF2F8"; style="rounded,filled"; penwidth=1.2; margin=14;
-    script [label=<<B>Google Apps Script Web App</B><BR/><FONT POINT-SIZE="9">/exec endpoint • validates shared secret</FONT><BR/><FONT POINT-SIZE="9">Validates recipient and 8-digit code format</FONT>>, fillcolor="#FCE7F3", color="#DB2777"];
+    script [label=<<B>Google Apps Script Web App</B><BR/><FONT POINT-SIZE="9">/exec endpoint • expected secret / email / code JSON contract</FONT><BR/><FONT POINT-SIZE="9">External script source not independently reviewed</FONT>>, fillcolor="#FCE7F3", color="#DB2777"];
     mailapp [label=<<B>Gmail MailApp</B><BR/><FONT POINT-SIZE="9">Sends LedgerLine verification email</FONT><BR/><FONT POINT-SIZE="9">Subject to Google account quotas</FONT>>, color="#DB2777"];
     inbox [label=<<B>Recipient mailbox</B><BR/><FONT POINT-SIZE="9">User receives OTP</FONT>>, color="#DB2777"];
     script -> mailapp [label="authorized send"];
@@ -54,7 +54,7 @@ digraph LedgerLineArchitecture {
   subgraph cluster_data {
     label=<<B>DATA &amp; INTEGRITY</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">Neon-managed PostgreSQL</FONT>>;
     color="#86EFAC"; fillcolor="#F0FDF4"; style="rounded,filled"; penwidth=1.4; margin=18;
-    db [shape=cylinder, label=<<B>Neon PostgreSQL</B><BR/><FONT POINT-SIZE="9">Production database: neondb</FONT>>, fillcolor="#DCFCE7", color="#16A34A", penwidth=1.6];
+    db [shape=cylinder, label=<<B>Neon PostgreSQL</B><BR/><FONT POINT-SIZE="9">Production database • owner-confirmed</FONT><BR/><FONT POINT-SIZE="9">Database name / branch not independently verified</FONT>>, fillcolor="#DCFCE7", color="#16A34A", penwidth=1.6];
     records [label=<<B>Application records</B><BR/><FONT POINT-SIZE="9">Users • Google identities • OTP challenges</FONT><BR/><FONT POINT-SIZE="9">Customer accounts • Ledger accounts</FONT><BR/><FONT POINT-SIZE="9">Journal transactions • Ledger entries</FONT><BR/><FONT POINT-SIZE="9">Idempotency records • Audit events</FONT>>, color="#22C55E"];
     controls [label=<<B>Database integrity controls</B><BR/><FONT POINT-SIZE="9">Constraints • triggers • row locks</FONT><BR/><FONT POINT-SIZE="9">Restricted runtime role • protected posted journal</FONT>>, fillcolor="#ECFDF5", color="#16A34A"];
     db -> records [dir=both, arrowhead=none, arrowtail=none, style=dashed, color="#16A34A"];

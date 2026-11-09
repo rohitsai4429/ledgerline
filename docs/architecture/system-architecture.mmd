@@ -1,0 +1,32 @@
+flowchart LR
+    Browser[User browser]
+    Static[Render Free Static Site<br/>ledgerline-frontend-bmtt.onrender.com]
+    Api[Render Free Web Service<br/>ledgerline-api-9dld.onrender.com]
+    Google[Google Identity Services]
+    Neon[(Neon PostgreSQL<br/>production)]
+    Script[Google Apps Script Web App]
+    Gmail[Gmail MailApp]
+    Inbox[Recipient inbox]
+    Repo[Private GitHub repository]
+    Migration[Trusted migration process<br/>direct privileged connection]
+    RuntimeSecrets[Backend-only secrets<br/>JWT and OTP HMAC keys<br/>mailer secret and DATABASE_URL]
+    PublicConfig[Browser-visible settings<br/>API base URL and Google Web Client ID]
+    Boundary[Internal demonstration ledger<br/>No bank/payment settlement]
+
+    Browser --> Static
+    Browser -->|HTTPS JSON + bearer JWT| Api
+    Static -->|VITE_API_BASE_URL| Api
+    Browser -->|Google credential| Google
+    Google -->|ID token| Browser
+    Browser -->|Credential + client ID| Api
+    Api -->|TLS pooled runtime URL| Neon
+    Migration -->|TLS direct privileged URL| Neon
+    Api -->|HTTPS JSON POST<br/>follows response redirect| Script
+    Script -->|MailApp.sendEmail| Gmail
+    Gmail --> Inbox
+    Inbox -. OTP entered by user .-> Browser
+    RuntimeSecrets -. Render backend environment .-> Api
+    PublicConfig -. Static build environment .-> Static
+    Repo -.->|exact deployment trigger unverified| Static
+    Repo -.->|exact deployment trigger unverified| Api
+    Neon --- Boundary

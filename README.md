@@ -9,6 +9,30 @@ verifiable transaction history.
 > LedgerLine is a demonstration financial ledger. Transactions update internal
 > account records and do not move real money through banks or payment providers.
 
+## At a glance
+
+| Frontend | Backend | Database | Hosting |
+|---|---|---|---|
+| [Render Static Site](https://ledgerline-frontend-bmtt.onrender.com) | [FastAPI on Render](https://ledgerline-api-9dld.onrender.com) | Neon PostgreSQL | Render Free |
+
+Authentication supports password and Google Identity Services sign-in, both
+followed by email OTP through Google Apps Script and Gmail MailApp. The
+repository is private; ask the project owner for access.
+
+### Documentation and architecture
+
+- [Project and technical documentation](docs/PROJECT_DOCUMENTATION.md)
+- [Technology stack](docs/TECHNOLOGY_STACK.md) ·
+  [Development history](docs/PROJECT_DEVELOPMENT_HISTORY.md) ·
+  [API reference](docs/API_REFERENCE.md) ·
+  [Environment configuration](docs/ENVIRONMENT_CONFIGURATION.md)
+- [Threat model](THREATS.md) ·
+  [Architecture index](docs/architecture/README.md)
+- [System diagram](docs/architecture/system-architecture.md) ·
+  [Authentication/OTP diagram](docs/architecture/authentication-otp-flow.png) ·
+  [Transaction flow](docs/architecture/transaction-flow.md) ·
+  [Deployment diagram](docs/architecture/deployment-architecture.md)
+
 ## Problem Statement
 
 Build a financial system supporting deposits,
@@ -36,7 +60,8 @@ integrity, transaction consistency and auditability.
    per-account debit/credit statement entries and audit events.
 
 Public registration always creates an account holder. Administrator/auditor
-provisioning is performed outside the public registration and frontend flows.
+provisioning is performed by a trusted operator using backend bootstrap
+tooling, not through public registration or the frontend.
 
 ## Technology Stack
 
@@ -59,8 +84,29 @@ provisioning is performed outside the public registration and frontend flows.
 - [x] Account management
 - [x] Deposits, withdrawals, and transfers
 - [x] Frontend development
-- [ ] Security testing
-- [ ] Deployment
+- [ ] Independent security assessment
+- [x] Render Free deployment with Neon PostgreSQL
+
+### Current deployment and verification
+
+| Component | Current deployment |
+| --- | --- |
+| Frontend | [https://ledgerline-frontend-bmtt.onrender.com](https://ledgerline-frontend-bmtt.onrender.com) |
+| Backend API | [https://ledgerline-api-9dld.onrender.com](https://ledgerline-api-9dld.onrender.com) |
+| Health | [https://ledgerline-api-9dld.onrender.com/health](https://ledgerline-api-9dld.onrender.com/health) |
+| Database | Production Neon PostgreSQL |
+| Hosting | Render Free |
+
+Authentication uses passwords or Google Identity Services, followed by email
+OTP verification. OTP email is delivered through a Google Apps Script Web App
+using Gmail `MailApp`. The full backend suite passed 75 tests before the mailer
+integration; the focused OTP/authentication/health suite passed 37 tests after
+the integration. Live password login and Google sign-in/account linking have
+been tested successfully. Fresh registration to a recipient other than the
+Apps Script owner's email remains to be verified after the mailer change.
+See [Project Documentation](docs/PROJECT_DOCUMENTATION.md) for the detailed
+verification record, production settings, limitations, and architecture
+diagrams.
 
 ## Repository Structure
 
@@ -164,7 +210,8 @@ Authentication endpoints:
 - `GET /api/v1/auth/me` — returns the authenticated user's safe profile.
 
 Passwords must be at least 12 characters. Registration does not accept a
-caller-supplied role; administrative account provisioning is not implemented.
+caller-supplied role; privileged role provisioning is restricted to the
+trusted operator bootstrap process.
 OTP codes expire after five minutes, allow at most five attempts, and are
 stored only as HMAC digests. Resends have a 60-second cooldown and a limit of
 five per account per hour. Configure `OTP_HMAC_SECRET`, `OTP_MAILER_URL`,
@@ -174,14 +221,16 @@ receives the shared secret, recipient email, and OTP in a JSON POST. Set
 `VITE_GOOGLE_CLIENT_ID` in the frontend build environment; it is a public client
 identifier, not a secret. Never put backend credentials in a `VITE_` variable.
 Authentication migration `20261108_0006` adds verified-email state, Google
-identity mappings, and persistent OTP challenges while preserving existing
-accounts as verified.
+identity mappings, and persistent OTP challenges. Migration `20261108_0007`
+resets legacy email-verification state when OTP audit evidence is absent.
 
 Account management endpoints:
 
 - `POST /api/v1/accounts` — authenticated account holders create an account
   with a generated account number, an associated ledger account, and a zero
   balance.
+- `POST /api/v1/accounts/recipient-lookup` — resolves a recipient account
+  number and returns a masked identifier for transfer confirmation.
 - `GET /api/v1/accounts` and `GET /api/v1/accounts/{account_id}` — account
   holders see their own accounts; administrators and auditors can read all
   accounts.
@@ -201,7 +250,9 @@ tokens, or submitted emails.
 
 The additive Alembic migrations are applied to the configured local
 database; authentication migration `20261108_0006` follows
-`20261107_0005`. PostgreSQL schema comparison
+`20261107_0005`, and `20261108_0007` corrects legacy email-verification state
+without OTP audit evidence. The repository head is `20261108_0007`.
+PostgreSQL schema comparison
 reports no pending model differences. Alembic requires the separate
 `MIGRATION_DATABASE_URL` and refuses to run as `ledgerline_app`. On an existing Docker volume, changing
 `POSTGRES_PASSWORD` does not update the stored PostgreSQL role password.
@@ -266,9 +317,9 @@ write-once audit system is claimed.
   journals, entries, idempotency records, audit events, Google identities, and
   email OTP challenges.
 
-The focused authentication tests for this change passed (27 backend and 7
-frontend tests). The full backend suite and PostgreSQL integration tests were
-not run for this authentication change.
+Earlier feature-specific test notes are historical. See
+[Project Documentation](docs/PROJECT_DOCUMENTATION.md#28-testing-strategy-and-test-results)
+for the latest full-suite and focused post-mailer results and their timing.
 
 ### Frontend product scope and limitations
 
@@ -282,8 +333,9 @@ auditor screens and API integration map are documented in
 The current API provides per-account statements containing debit/credit
 entries, but no journal-wide raw-entry endpoint. Transaction history supports
 server-side account filtering and pagination; free-text and type filters in the
-frontend apply only to the currently loaded result page. Transfers use a
-recipient account UUID because there is no account-number lookup endpoint.
+frontend apply only to the currently loaded result page. A recipient lookup
+endpoint resolves an account number before transfer; the transaction request
+uses the resolved account UUID.
 Bearer JWTs are kept in browser memory because cookie authentication and token
 refresh are not supported. These frontend limitations are not replaced with
 mock data.
@@ -383,30 +435,28 @@ Playwright HTML report with attached role screenshots is generated at
 `frontend/playwright-report/index.html`; test results are in
 `frontend/test-results/`. These generated files are ignored by Git.
 
-## Zero-Cost Render + Neon Deployment Runbook
+## Render Free + Neon Deployment and Operations
 
-This is a hobby/demo deployment target, not a production availability
-commitment. Render Free web services sleep after 15 idle minutes, have
-ephemeral filesystems, share a 750-hour monthly free-instance allowance per
-workspace, cannot receive private-network traffic, and do not provide Shell or
-one-off jobs. Neon Free currently has usage/storage/egress quotas and scales
-compute to zero (currently 100 CU-hours and 1 GB storage per project, with
-5 GB monthly public egress). Neon describes Free as permanent and requiring no
-credit card. Keep both providers on their Free plans, confirm account limits
-before setup, and monitor usage; do not enable paid upgrades or rely on paid
-credits. Exceeding quotas can suspend or limit service. Render Free can also
-suspend services that generate unusual outbound traffic to external databases.
+LedgerLine is currently deployed as a demonstration service, not a production
+availability commitment. The frontend and backend use Render Free; Render
+Free web services may sleep after inactivity, have ephemeral filesystems,
+cannot receive private-network traffic, and do not provide Shell or one-off
+jobs. The production database is Neon PostgreSQL; its plan and current usage
+limits should be checked in the Neon console rather than inferred here. Review
+provider limits and monitor usage. Render Free may also suspend services that
+generate unusual outbound traffic to external databases.
 
-The repo's [`render.yaml`](./render.yaml) defines only the API and static
-frontend. It does not create Neon resources or store any secret.
+The repo's [`render.yaml`](./render.yaml) defines the API and static frontend.
+It does not create Neon resources or store any secret.
 
-### Exact Render dashboard configuration
+### Render service configuration
 
-Create a **Static Site** and a **Web Service** from the private repository.
-Keep the repository private. The Blueprint pins the Web Service to `plan: free`;
-if configuring it manually, explicitly choose **Free** (Render otherwise
-defaults a new Web Service to paid `0.5c-512mb`). Static Site hosting is free;
-do not add a paid plan or custom-domain purchase.
+The project owner confirms the frontend and backend are deployed at the URLs
+above. The checked-in Blueprint defines a **Static Site** and a **Web
+Service**; the exact Render Dashboard values, source branch, and
+auto-deployment trigger were not independently inspected. Keep the repository
+private. The Blueprint pins the Web Service to `plan: free`; when reproducing
+this deployment, explicitly choose **Free**. Static Site hosting is free.
 
 | Setting | Frontend | Backend |
 | --- | --- | --- |
@@ -425,21 +475,20 @@ These settings are also in the Blueprint. On Render Free the API cannot
 receive private-network traffic and Neon is not on Render's private network;
 the API must connect to Neon's public endpoint over TLS. Do not configure
 Render's private database URL or claim this path is private networking.
-With the Blueprint service names, expected URLs are
-`https://ledgerline-api.onrender.com` and
-`https://ledgerline-frontend.onrender.com` when those names are available.
-The Blueprint sets `VITE_API_BASE_URL` and `CORS_ALLOWED_ORIGINS` to those
-exact origins. If Render assigns either service a different host, update the
-frontend build variable and API CORS value to the exact Dashboard URLs before
-deploying. `DATABASE_URL` and `JWT_SECRET_KEY` use `sync: false` and must be
-entered manually as secret environment values; no secret is in the manifest.
+The deployed service URLs are
+`https://ledgerline-api-9dld.onrender.com` and
+`https://ledgerline-frontend-bmtt.onrender.com`. Set
+`VITE_API_BASE_URL` to the backend URL and `CORS_ALLOWED_ORIGINS` to the exact
+frontend origin shown here. `DATABASE_URL` and `JWT_SECRET_KEY` use
+`sync: false` and must be entered manually as secret environment values; no
+secret is in the manifest.
 
 ### Neon project and restricted runtime role
 
-1. In Neon, create one PostgreSQL 17 project on the **Free** plan, with a
-   database named `ledgerline`. Do not create extra projects or branches.
-   Record the initial owner role name shown by Neon; Neon normally generates
-   it from the database name (for example `ledgerline_owner`).
+1. Production PostgreSQL is hosted on Neon. The remaining steps document the
+   owner/runtime-role setup for initial provisioning or recovery; they are
+   not an instruction to create a duplicate production project. Confirm the
+   active project and database details in the Neon console before operating.
 2. Obtain separate Neon connection strings for the database owner and runtime
    role. Use the **direct** endpoint for provisioning and Alembic, and the
    **pooled** (`-pooler`) endpoint for the FastAPI runtime. Change only the
@@ -552,7 +601,7 @@ Render.
 | --- | --- | --- |
 | Render API | `DATABASE_URL` | Neon pooled (`-pooler`) `postgresql+psycopg://` URL using `ledgerline_app`, database `ledgerline`, TLS required |
 | Render API | `JWT_SECRET_KEY` | Unique generated secret, at least 32 characters |
-| Render API | `CORS_ALLOWED_ORIGINS` | `https://ledgerline-frontend.onrender.com` if assigned; otherwise the exact Dashboard static-site origin, no slash/path |
+| Render API | `CORS_ALLOWED_ORIGINS` | `https://ledgerline-frontend-bmtt.onrender.com` |
 | Render API | `APP_ENV` | `production` |
 | Render API | `LOG_LEVEL` | `INFO` |
 | Render API | `APP_NAME` | Optional; defaults to `LedgerLine API` |
@@ -560,47 +609,52 @@ Render.
 | Render API | `JWT_ACCESS_TOKEN_MINUTES` | Optional; defaults to `30` |
 | Render API | `GOOGLE_CLIENT_ID` | Google Identity Services Web Client ID |
 | Render API | `OTP_HMAC_SECRET` | Unique random secret, at least 32 characters |
-| Render API | `OTP_MAILER_URL` | Google Apps Script Web App deployment URL |
+| Render API | `OTP_MAILER_URL` | Deployed Google Apps Script Web App `/exec` URL |
 | Render API | `OTP_MAILER_SECRET` | Backend-only shared secret for the Apps Script mailer |
-| Render Static Site build | `VITE_API_BASE_URL` | `https://ledgerline-api.onrender.com` if assigned; otherwise the exact Dashboard API URL, no trailing slash |
+| Render Static Site build | `VITE_API_BASE_URL` | `https://ledgerline-api-9dld.onrender.com` |
 | Render Static Site build | `VITE_GOOGLE_CLIENT_ID` | Public Google Identity Services Web Client ID; must match backend `GOOGLE_CLIENT_ID` |
 | Local migration/provision/bootstrap process only | `MIGRATION_DATABASE_URL` | Neon direct migration-owner URL; never configured on Render |
 
 `backend/app/core/config.py` loads runtime settings from the API process
-environment (or the ignored local `.env`). Alembic independently reads
+environment (or the ignored local `.env`). Set `OTP_MAILER_URL` to the Apps
+Script deployment URL and `OTP_MAILER_SECRET` to the matching backend-only
+shared secret; retain the separate `OTP_HMAC_SECRET` for OTP digesting.
+Alembic independently reads
 `MIGRATION_DATABASE_URL` in `backend/alembic/env.py`. Frontend
 `VITE_API_BASE_URL` is a public build-time setting, not a secret. Set
-`CORS_ALLOWED_ORIGINS` to the exact HTTPS origin Render assigns to the static
-site. For browser previews or custom domains, add only each exact origin.
+`CORS_ALLOWED_ORIGINS` to `https://ledgerline-frontend-bmtt.onrender.com`.
+For browser previews or custom domains, add only each exact origin.
 `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` in `backend/.env.example` are for the
 local Docker Compose bootstrap only; do not configure them on Render or use
 them for Neon. `backend/docker/init-app-role.sql` is likewise a local Compose
 bootstrap script, not a Neon provisioning script.
 
-### Compatibility and deployment verification
+### Production deployment and verification
 
-Confirmed from the repository: `/health` returns `{"status":"ok"}` and is
+The `/health` route returns `{"status":"ok"}` in the application and is
 suitable as Render's liveness health-check path, but it does not check the
 database. Financial tables, constraints, deferred triggers, and PL/pgSQL
-functions use PostgreSQL features supported by Neon. Both connections require
-TLS; Alembic and provisioning use Neon's direct endpoint, while the API uses
-the pooled endpoint. Neon compatibility with actual role permissions still
-needs an isolated preflight migration before relying on the deployment.
+functions use PostgreSQL features supported by Neon. The project owner
+confirms production uses Neon PostgreSQL and Render Free at the URLs above.
+The documented connection strategy requires TLS and uses Neon's direct
+endpoint for Alembic/provisioning and a pooled endpoint for the API; actual
+production connection strings and Dashboard settings were not inspected.
+The health endpoint does not independently confirm database readiness.
 
-After configuration and migrations, verify with synthetic demonstration data:
+Use synthetic demonstration data for any further live checks:
 
-1. Health: `curl -fsS https://<api-name>.onrender.com/health` returns
+1. Health: `curl -fsS https://ledgerline-api-9dld.onrender.com/health` returns
    `{"status":"ok"}`.
 2. Database: use a local, hidden-prompt smoke-check script or the API logs to
    confirm API connections authenticate as `ledgerline_app` to `ledgerline`;
    never print the URL. Confirm registration succeeds, which exercises the
    restricted runtime role.
-3. HTTPS/CORS: use the frontend's `https://<site-name>.onrender.com` origin;
-   verify its browser requests reach the HTTPS API. Check a preflight:
+3. HTTPS/CORS: use the deployed frontend origin and verify its browser
+   requests reach the HTTPS API. Check a preflight:
 
    ```sh
-   curl -i -X OPTIONS 'https://<api-name>.onrender.com/api/v1/auth/login' \
-     -H 'Origin: https://<site-name>.onrender.com' \
+   curl -i -X OPTIONS 'https://ledgerline-api-9dld.onrender.com/api/v1/auth/login' \
+     -H 'Origin: https://ledgerline-frontend-bmtt.onrender.com' \
      -H 'Access-Control-Request-Method: POST' \
      -H 'Access-Control-Request-Headers: content-type'
    ```
@@ -614,8 +668,6 @@ After configuration and migrations, verify with synthetic demonstration data:
    admin account/status/reversal/audit functions and auditor read-only access;
    confirm auditor mutations are denied. Never elevate a public registration
    or use real financial/customer records.
-
-No Neon project or Render service has been created, migrated, or deployed.
 
 ## Security and Integrity
 
@@ -699,13 +751,15 @@ but role-based authorization and audit attribution for status changes remain
 application responsibilities. Runtime credentials are therefore trusted
 backend credentials, not per-user database identities.
 
-Verification performed after migration:
+Historical verification at the restricted-role migration stage (before later
+authentication and mailer changes):
 
 - `.\.venv\Scripts\alembic.exe current` and `heads` — `20261107_0005` is the
   current revision and sole head.
 - `.\.venv\Scripts\alembic.exe check` — no new upgrade operations detected.
 - `.\.venv\Scripts\python.exe -m pytest -q` — **56 passed** (one existing
-  Starlette `TestClient` deprecation warning).
+  Starlette `TestClient` deprecation warning); this is not the latest full
+  suite result or a post-mailer test run.
 - Direct SQL permission probes against the existing public schema — all 16
   prohibited operations returned SQLSTATE `42501`; inconsistent balance
   mutation was rejected by the database trigger with `P0001`.
@@ -734,7 +788,9 @@ LedgerLine follows a Modular Monolithic Architecture.
 
 | Document | Description |
 |---|---|
-| [ER Diagram](docs/architecture/erd.mmd) | Database entities and relationships |
+| [ER Diagram](docs/architecture/erd.mmd.png) | Database entities and relationships |
+| [System Architecture Diagram](docs/architecture/system-architecture.md) | Deployment and logical components |
+| [Authentication and OTP Flow](docs/architecture/authentication-otp-flow.png) | Password/Google authentication and email OTP sequence |
 | [System Architecture](docs/architecture/system-architecture.md) | Application architecture |
 | [Data Dictionary](docs/architecture/data-dictionary.md) | Database tables and constraints |
 | [Transaction Flow](docs/architecture/transaction-flow.md) | Financial transaction workflows |
@@ -755,5 +811,5 @@ LedgerLine follows a Modular Monolithic Architecture.
 - [x] Account management
 - [x] Deposits, withdrawals, and transfers
 - [x] Frontend development
-- [ ] Security testing
-- [ ] Deployment
+- [ ] Independent security assessment
+- [x] Render Free deployment with Neon PostgreSQL

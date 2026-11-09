@@ -167,8 +167,10 @@ Passwords must be at least 12 characters. Registration does not accept a
 caller-supplied role; administrative account provisioning is not implemented.
 OTP codes expire after five minutes, allow at most five attempts, and are
 stored only as HMAC digests. Resends have a 60-second cooldown and a limit of
-five per account per hour. Configure `OTP_HMAC_SECRET`, `RESEND_API_KEY`,
-`RESEND_FROM_EMAIL`, and `GOOGLE_CLIENT_ID` in the backend environment. Set
+five per account per hour. Configure `OTP_HMAC_SECRET`, `OTP_MAILER_URL`,
+`OTP_MAILER_SECRET`, and `GOOGLE_CLIENT_ID` in the backend environment.
+`OTP_MAILER_URL` is the Google Apps Script Web App deployment URL; the mailer
+receives the shared secret, recipient email, and OTP in a JSON POST. Set
 `VITE_GOOGLE_CLIENT_ID` in the frontend build environment; it is a public client
 identifier, not a secret. Never put backend credentials in a `VITE_` variable.
 Authentication migration `20261108_0006` adds verified-email state, Google
@@ -558,8 +560,8 @@ Render.
 | Render API | `JWT_ACCESS_TOKEN_MINUTES` | Optional; defaults to `30` |
 | Render API | `GOOGLE_CLIENT_ID` | Google Identity Services Web Client ID |
 | Render API | `OTP_HMAC_SECRET` | Unique random secret, at least 32 characters |
-| Render API | `RESEND_API_KEY` | Backend-only Resend API credential |
-| Render API | `RESEND_FROM_EMAIL` | Verified sender address for OTP messages |
+| Render API | `OTP_MAILER_URL` | Google Apps Script Web App deployment URL |
+| Render API | `OTP_MAILER_SECRET` | Backend-only shared secret for the Apps Script mailer |
 | Render Static Site build | `VITE_API_BASE_URL` | `https://ledgerline-api.onrender.com` if assigned; otherwise the exact Dashboard API URL, no trailing slash |
 | Render Static Site build | `VITE_GOOGLE_CLIENT_ID` | Public Google Identity Services Web Client ID; must match backend `GOOGLE_CLIENT_ID` |
 | Local migration/provision/bootstrap process only | `MIGRATION_DATABASE_URL` | Neon direct migration-owner URL; never configured on Render |

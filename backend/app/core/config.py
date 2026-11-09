@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     jwt_access_token_minutes: int = Field(default=30, gt=0, le=1440)
     google_client_id: str | None = None
     otp_hmac_secret: SecretStr | None = Field(default=None, min_length=32)
-    resend_api_key: SecretStr | None = None
-    resend_from_email: str | None = None
+    otp_mailer_url: str | None = None
+    otp_mailer_secret: SecretStr | None = None
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

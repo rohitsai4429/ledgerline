@@ -72,28 +72,23 @@ def _digest(challenge_id: UUID, user_id: UUID, code: str) -> str:
 
 def send_otp_email(email: str, code: str) -> None:
     settings = get_settings()
-    if settings.resend_api_key is None or not settings.resend_from_email:
+    if not settings.otp_mailer_url or settings.otp_mailer_secret is None:
         raise OtpDeliveryError
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=10, follow_redirects=True) as client:
             response = client.post(
-                "https://api.resend.com/emails",
-                headers={
-                    "Authorization": f"Bearer {settings.resend_api_key.get_secret_value()}",
-                    "Content-Type": "application/json",
-                },
+                settings.otp_mailer_url,
                 json={
-                    "from": settings.resend_from_email,
-                    "to": [email],
-                    "subject": "Your LedgerLine verification code",
-                    "text": (
-                        f"Your LedgerLine verification code is {code}. "
-                        "It expires in 5 minutes. If you did not request this, ignore this email."
-                    ),
+                    "secret": settings.otp_mailer_secret.get_secret_value(),
+                    "email": email,
+                    "code": code,
                 },
             )
             response.raise_for_status()
-    except (httpx.HTTPError, OtpDeliveryError):
+            result = response.json()
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise OtpDeliveryError
+    except (httpx.HTTPError, ValueError, OtpDeliveryError):
         raise OtpDeliveryError from None
 
 

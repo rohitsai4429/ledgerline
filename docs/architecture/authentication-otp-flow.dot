@@ -1,0 +1,55 @@
+digraph LedgerLineOtpFlow {
+  graph [rankdir=TB, bgcolor="#F7F9FC", pad="0.28", nodesep="0.36", ranksep="0.48", splines=ortho, compound=true,
+    fontname="Inter", fontsize=22, labelloc=t, labeljust=l,
+    label=<<B>LEDGERLINE</B>  <FONT POINT-SIZE="14" COLOR="#64748B">AUTHENTICATION &amp; OTP FLOW</FONT><BR/><FONT POINT-SIZE="10" COLOR="#64748B">Password and Google identity paths converge on a shared OTP verification gate</FONT>>];
+  node [shape=box, style="rounded,filled", fontname="Inter", fontsize=10, margin="0.15,0.09", color="#CBD5E1", penwidth=1.1, fillcolor="#FFFFFF", fontcolor="#172033"];
+  edge [fontname="Inter", fontsize=9, color="#64748B", fontcolor="#475569", penwidth=1.25, arrowsize=0.72];
+
+  subgraph cluster_start {
+    label=<<B>1. AUTHENTICATION ENTRY</B>>; color="#CBD5E1"; fillcolor="#F1F5F9"; style="rounded,filled"; margin=16;
+    password [label=<<B>Password path</B><BR/><FONT POINT-SIZE="9">Email + password submitted</FONT>>, fillcolor="#EAF2FF", color="#5B8DEF"];
+    google [label=<<B>Google path</B><BR/><FONT POINT-SIZE="9">Google Identity Services ID token</FONT>>, fillcolor="#F5F3FF", color="#8B5CF6"];
+  }
+
+  subgraph cluster_api {
+    label=<<B>2. FASTAPI AUTHENTICATION SERVICE</B><BR/><FONT POINT-SIZE="9" COLOR="#64748B">Render: ledgerline-api</FONT>>; color="#93C5FD"; fillcolor="#EFF6FF"; style="rounded,filled"; margin=16;
+    validate [label=<<B>Validate identity</B><BR/><FONT POINT-SIZE="9">Argon2 password check OR Google ID-token</FONT><BR/><FONT POINT-SIZE="9">issuer • audience • expiry • verified email</FONT>>, fillcolor="#DBEAFE", color="#3B82F6"];
+    link [label=<<B>Resolve Google identity</B><BR/><FONT POINT-SIZE="9">Existing account match requires explicit link confirmation</FONT><BR/><FONT POINT-SIZE="9">No silent account merge</FONT>>, fillcolor="#F5F3FF", color="#8B5CF6"];
+    create [label=<<B>Create OTP challenge</B><BR/><FONT POINT-SIZE="9">Generate 8-digit code; 5-minute expiry</FONT><BR/><FONT POINT-SIZE="9">HMAC-SHA256 digest; attempt and resend limits</FONT>>, fillcolor="#E0F2FE", color="#0284C7"];
+  }
+
+  subgraph cluster_db {
+    label=<<B>3. NEON POSTGRESQL</B>>; color="#86EFAC"; fillcolor="#F0FDF4"; style="rounded,filled"; margin=16;
+    challenge [label=<<B>email_otp_challenges</B><BR/><FONT POINT-SIZE="9">Digest • expiry • attempts • consumed state</FONT><BR/><FONT POINT-SIZE="9">Pending Google link (when applicable)</FONT>>, fillcolor="#DCFCE7", color="#16A34A"];
+  }
+
+  subgraph cluster_mail {
+    label=<<B>4. EMAIL DELIVERY — GOOGLE APPS SCRIPT + GMAIL</B>>; color="#F9A8D4"; fillcolor="#FDF2F8"; style="rounded,filled"; margin=16;
+    request [label=<<B>Backend HTTPS POST</B><BR/><FONT POINT-SIZE="9">OTP_MAILER_URL</FONT><BR/><FONT POINT-SIZE="9">JSON: secret + recipient email + OTP</FONT>>, fillcolor="#FCE7F3", color="#DB2777"];
+    endpoint [label=<<B>Apps Script Web App (/exec)</B><BR/><FONT POINT-SIZE="9">Compares shared secret with Script Property</FONT><BR/><FONT POINT-SIZE="9">Validates email and 8-digit code</FONT>>, fillcolor="#FCE7F3", color="#DB2777"];
+    mailapp [label=<<B>Gmail MailApp</B><BR/><FONT POINT-SIZE="9">Sends verification message as script owner</FONT><BR/><FONT POINT-SIZE="9">Google daily quota / policy applies</FONT>>, fillcolor="#FFFFFF", color="#DB2777"];
+    mailbox [label=<<B>User mailbox</B><BR/><FONT POINT-SIZE="9">Receives verification code</FONT>>, fillcolor="#FFFFFF", color="#DB2777"];
+    request -> endpoint [label="HTTPS; redirect-aware client"];
+    endpoint -> mailapp [label="secret accepted"];
+    mailapp -> mailbox [label="email"];
+  }
+
+  subgraph cluster_finish {
+    label=<<B>5. OTP VERIFICATION &amp; SESSION</B>>; color="#93C5FD"; fillcolor="#EFF6FF"; style="rounded,filled"; margin=16;
+    submit [label=<<B>User submits challenge ID + OTP</B>>, fillcolor="#FFFFFF", color="#3B82F6"];
+    verify [label=<<B>FastAPI verifies OTP</B><BR/><FONT POINT-SIZE="9">HMAC compare • expiry • attempt cap</FONT><BR/><FONT POINT-SIZE="9">Single-use consume; complete Google link if pending</FONT>>, fillcolor="#DBEAFE", color="#3B82F6"];
+    token [label=<<B>Issue LedgerLine JWT</B><BR/><FONT POINT-SIZE="9">Only after successful OTP verification</FONT>>, fillcolor="#DCFCE7", color="#16A34A", penwidth=1.5];
+    dashboard [label=<<B>Authenticated SPA session</B><BR/><FONT POINT-SIZE="9">Role-aware dashboard and API access</FONT>>, fillcolor="#FFFFFF", color="#3B82F6"];
+    submit -> verify -> token -> dashboard;
+  }
+
+  password -> validate;
+  google -> validate;
+  validate -> link [label="Google identity path", style=dashed];
+  validate -> create [label="password path"];
+  link -> create [label="identity resolved / confirmed"];
+  create -> challenge [label="persist digest and state"];
+  challenge -> request [label="code available for delivery"];
+  mailbox -> submit [label="user reads code", style=dashed, color="#BE185D", fontcolor="#9D174D"];
+  verify -> challenge [label="load + consume challenge", dir=both, style=dashed, color="#15803D", fontcolor="#166534", constraint=false];
+}
